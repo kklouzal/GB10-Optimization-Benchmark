@@ -23,16 +23,32 @@ The base image is configurable because NGC tags move over time. Prefer a current
 
 ## Run full collector + benchmark + analysis
 
+Recommended official run shape for the current GB10 topology:
+- performance cores only: `5-9,15-19`
+- efficiency cores left free: `0-4,10-14`
+- DCGM enabled at level 1
+- large shared memory and explicit memlock/nofile limits
+
 ```bash
 mkdir -p results
 
 docker run --rm -it --gpus all \
+  --cpuset-cpus=5-9,15-19 \
   --privileged --pid=host --net=host --ipc=host --uts=host \
-  --cap-add SYS_ADMIN --cap-add SYS_PTRACE --cap-add PERFMON \
+  --ulimit memlock=-1 --ulimit nofile=1048576:1048576 \
+  --shm-size=64g \
+  --security-opt seccomp=unconfined \
+  --cap-add SYS_ADMIN --cap-add SYS_PTRACE --cap-add PERFMON --cap-add IPC_LOCK --cap-add SYS_NICE \
+  -e GB10_PROFILE=perf-cores-runtime-maxperf \
+  -e GB10_CPUSET=5-9,15-19 \
+  -e GB10_SHM_SIZE=64g \
   -e RUN_NVBANDWIDTH=1 \
-  -e RUN_DCGM=0 \
+  -e RUN_DCGM=1 \
+  -e RUN_DCGM_LEVEL=1 \
   -e RUN_STREAM=1 \
   -e RUN_FIO=0 \
+  -e OMP_NUM_THREADS=10 \
+  -e MALLOC_ARENA_MAX=2 \
   -e BENCH_SECONDS=20 \
   -v /:/host:ro \
   -v /dev:/dev \
@@ -41,6 +57,8 @@ docker run --rm -it --gpus all \
   -v "$PWD/results:/results" \
   gb10-spark-perf-lab:ngc all
 ```
+
+The resulting archive now also includes an automatic reboot/preflight snapshot, run context, and before/after GPU state snapshots.
 
 The container prints an archive path like:
 
@@ -52,14 +70,24 @@ Upload or share that archive for review. The most important file is `report.md`.
 
 ## Optional heavier diagnostics
 
-DCGM is baked into the benchmark image by default. It is still expensive, so keep it opt-in and run it only with the privileged/host-namespace launch shape shown below:
+DCGM is baked into the benchmark image by default. The official run above already enables a light `RUN_DCGM_LEVEL=1`. For a heavier pass, raise the level explicitly:
 
 ```bash
 docker run --rm -it --gpus all \
+  --cpuset-cpus=5-9,15-19 \
   --privileged --pid=host --net=host --ipc=host --uts=host \
+  --ulimit memlock=-1 --ulimit nofile=1048576:1048576 \
+  --shm-size=64g \
+  --security-opt seccomp=unconfined \
+  --cap-add SYS_ADMIN --cap-add SYS_PTRACE --cap-add PERFMON --cap-add IPC_LOCK --cap-add SYS_NICE \
+  -e GB10_PROFILE=perf-cores-runtime-maxperf-dcgm2 \
+  -e GB10_CPUSET=5-9,15-19 \
+  -e GB10_SHM_SIZE=64g \
   -e RUN_DCGM=1 -e RUN_DCGM_LEVEL=2 \
-  -e RUN_NVBANDWIDTH=1 \
-  -v /:/host:ro -v /dev:/dev -v /sys:/sys:ro -v "$PWD/results:/results" \
+  -e RUN_NVBANDWIDTH=1 -e RUN_STREAM=1 -e RUN_FIO=0 \
+  -e OMP_NUM_THREADS=10 -e MALLOC_ARENA_MAX=2 \
+  -v /:/host:ro -v /dev:/dev -v /sys:/sys:ro -v /proc:/host_proc:ro \
+  -v "$PWD/results:/results" \
   gb10-spark-perf-lab:ngc all
 ```
 
@@ -79,6 +107,14 @@ gb10-lab analyze    # generate report.md from a result directory
 gb10-lab tune-plan  # print A/B tuning matrix; does not modify host
 gb10-lab apply-safe # low-risk runtime knobs only; requires GB10_APPLY=1
 ```
+
+## Automatic benchmark context captured in artifacts
+
+Every run now records:
+- a concise reboot/preflight snapshot (`host/reboot_preflight.txt`)
+- benchmark run context including profile/cpuset/DCGM settings (`bench/run_context.txt`)
+- GPU state before and after the benchmark (`bench/gpu_state_before.txt`, `bench/gpu_state_after.txt`)
+- memory, swap, running containers, and top CPU consumers after the run
 
 ## Why privileged?
 
@@ -112,6 +148,9 @@ BENCH_SECONDS=20
 BENCH_MAX_ALLOC_FRAC=0.55
 NVBANDWIDTH_SAMPLES=5
 NVBANDWIDTH_BUFFER_MB=512
+GB10_PROFILE=perf-cores-runtime-maxperf
+GB10_CPUSET=5-9,15-19
+GB10_SHM_SIZE=64g
 RUN_DCGM=1
 RUN_DCGM_LEVEL=1
 DCGM_TIMEOUT=2400

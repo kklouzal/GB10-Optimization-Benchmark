@@ -3,8 +3,58 @@ set -Eeuo pipefail
 source "${GB10_LAB_HOME:-/opt/gb10-spark-perf-lab}/scripts/common.sh"
 NO_ARCHIVE=0
 [[ "${1:-}" == "--no-archive" ]] && NO_ARCHIVE=1
-mkdir -p "$OUT"/{bench,gpu,logs}
+mkdir -p "$OUT"/{bench,gpu,logs,host}
 log "running benchmarks into $OUT"
+
+cat > "$OUT/bench/run_context.txt" <<EOFCTX
+profile=${GB10_PROFILE:-unspecified}
+cpuset=${GB10_CPUSET:-unspecified}
+run_dcgm=${RUN_DCGM:-0}
+run_dcgm_level=${RUN_DCGM_LEVEL:-1}
+run_nvbandwidth=${RUN_NVBANDWIDTH:-1}
+run_stream=${RUN_STREAM:-1}
+run_fio=${RUN_FIO:-0}
+bench_seconds=${BENCH_SECONDS:-20}
+bench_sizes=${BENCH_SIZES:-4096,8192,12288,16384}
+shm_hint=${GB10_SHM_SIZE:-unspecified}
+omp_num_threads=${OMP_NUM_THREADS:-unset}
+malloc_arena_max=${MALLOC_ARENA_MAX:-unset}
+cuda_module_loading=${CUDA_MODULE_LOADING:-unset}
+cuda_device_max_connections=${CUDA_DEVICE_MAX_CONNECTIONS:-unset}
+EOFCTX
+
+run_host host/reboot_preflight '
+echo "== identity =="
+date -Iseconds
+uname -a
+cat /etc/dgx-release 2>/dev/null || true
+cat /etc/os-release | grep -E "PRETTY_NAME|VERSION_CODENAME" || true
+
+echo
+echo "== boot/perf state =="
+cat /proc/cmdline
+cat /sys/devices/system/cpu/vulnerabilities/* 2>/dev/null || true
+cat /proc/sys/kernel/numa_balancing 2>/dev/null || true
+grep -o "init_on_alloc=[01]" /proc/cmdline || true
+grep -i huge /proc/meminfo || true
+lscpu -e=CPU,CORE,SOCKET,NODE,MAXMHZ,MINMHZ,MHZ 2>/dev/null || true
+
+echo
+echo "== gpu =="
+nvidia-smi
+nvidia-smi -q -d PERFORMANCE,CLOCK,POWER,TEMPERATURE
+nvidia-smi boost-slider -l 2>/dev/null || true
+nvidia-smi power-profiles -l 2>/dev/null || true
+nvidia-smi power-smoothing -ppd 2>/dev/null || true
+
+echo
+echo "== memory/process cleanliness =="
+free -h
+swapon --show
+docker ps
+ps -eo pid,ppid,psr,pcpu,pmem,comm,args --sort=-pcpu | head -n 40
+'
+run_host bench/gpu_state_before 'nvidia-smi -q -d PERFORMANCE,CLOCK,POWER,TEMPERATURE 2>/dev/null || true'
 
 run bench/cuda_smoke 'if command -v gb10-cuda-smoke >/dev/null; then gb10-cuda-smoke; else echo "gb10-cuda-smoke not available"; fi'
 
@@ -52,6 +102,14 @@ if [[ "${RUN_FIO:-0}" == "1" ]]; then
 else
   echo "Set RUN_FIO=1 to run non-destructive temp-file fio benchmark in /results." > "$OUT/bench/fio_SKIPPED.txt"
 fi
+
+run_host bench/gpu_state_after 'nvidia-smi -q -d PERFORMANCE,CLOCK,POWER,TEMPERATURE 2>/dev/null || true'
+run_host bench/system_state_after '
+free -h
+swapon --show
+docker ps
+ps -eo pid,ppid,psr,pcpu,pmem,comm,args --sort=-pcpu | head -n 40
+'
 
 if [[ "$NO_ARCHIVE" == "0" ]]; then
   "$LAB_HOME/scripts/gb10-analyze.py" "$OUT" || true
