@@ -1,4 +1,5 @@
 results/
+.run-logs/
 *.tar.gz
 __pycache__/
 *.pyc
