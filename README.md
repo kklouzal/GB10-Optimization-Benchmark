@@ -115,6 +115,7 @@ Every run now records:
 - benchmark run context including profile/cpuset/DCGM settings and vboost plan (`bench/run_context.txt`)
 - GPU state before and after the benchmark (`bench/gpu_state_before.txt`, `bench/gpu_state_after.txt`)
 - top-level boost-slider snapshots (`bench/boost_slider_before.txt`, `bench/boost_slider_after.txt`)
+- top-level vboost summaries (`bench/vboost_summary.md`, `bench/vboost_summary.json`) that make the sweep outcome obvious at a glance
 - per-vboost subdirectories with `torch_bench.json`, `torch_meta.json`, `nvidia_smi_live.csv`, and `nvidia_smi_dmon.csv`
 - memory, swap, running containers, and top CPU consumers after the run
 

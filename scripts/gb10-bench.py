@@ -439,6 +439,94 @@ def append_flattened(aggregate, run_result):
     aggregate.setdefault("allocator", []).extend(run_result.get("allocator", []))
 
 
+def best_rows(rows, key, *, require_vboost=True):
+    filtered = [row for row in rows if row.get(key) is not None and (not require_vboost or row.get("vboost") is not None)]
+    grouped = {}
+    for row in filtered:
+        label = row.get("dtype") or row.get("kind") or "unknown"
+        prev = grouped.get(label)
+        if prev is None or (row.get(key) or 0) > (prev.get(key) or 0):
+            grouped[label] = row
+    return grouped
+
+
+def build_vboost_summary(aggregate):
+    runs = aggregate.get("runs") or []
+    planned = (aggregate.get("vboost") or {}).get("planned_values") or []
+    mat_rows = aggregate.get("matmul") or []
+    bw_rows = aggregate.get("bandwidth") or []
+    preferred = [row for row in mat_rows if row.get("dtype") in {"bf16", "fp16"} and row.get("median_TFLOP_s") is not None and row.get("vboost") is not None]
+    best_pref_by_vboost = {}
+    for row in preferred:
+        value = row["vboost"]
+        score = row.get("median_TFLOP_s") or 0
+        if score > best_pref_by_vboost.get(value, {}).get("median_TFLOP_s", -1):
+            best_pref_by_vboost[value] = {
+                "vboost": value,
+                "dtype": row.get("dtype"),
+                "n": row.get("n"),
+                "median_TFLOP_s": score,
+                "best_TFLOP_s": row.get("best_TFLOP_s"),
+            }
+    ordered_pref = [best_pref_by_vboost[v] for v in sorted(best_pref_by_vboost)]
+    winner = None
+    if ordered_pref:
+        winner = max(ordered_pref, key=lambda row: row.get("median_TFLOP_s") or 0)
+    summary = {
+        "planned_values": planned,
+        "completed_values": [run.get("vboost") for run in runs if run.get("status") == "ok"],
+        "winner_by_best_bf16_fp16_median": winner,
+        "best_bf16_fp16_median_by_vboost": ordered_pref,
+        "best_matmul_by_dtype": best_rows(mat_rows, "median_TFLOP_s"),
+        "best_bandwidth_by_kind": best_rows(bw_rows, "best_GB_s"),
+        "run_statuses": [
+            {
+                "vboost": run.get("vboost"),
+                "status": run.get("status"),
+                "set_ok": (run.get("set_result") or {}).get("ok"),
+                "before_current": (run.get("boost_slider_before") or {}).get("current_value"),
+                "after_current": (run.get("boost_slider_after") or {}).get("current_value"),
+            }
+            for run in runs
+        ],
+    }
+    return summary
+
+
+def write_vboost_summary(out: Path, aggregate):
+    summary = build_vboost_summary(aggregate)
+    write_json(out / "vboost_summary.json", summary)
+    lines = []
+    lines.append("# VBoost Summary")
+    lines.append("")
+    lines.append(f"Planned values: {', '.join(str(v) for v in summary.get('planned_values') or []) or 'none'}")
+    lines.append(f"Completed values: {', '.join(str(v) for v in summary.get('completed_values') or []) or 'none'}")
+    winner = summary.get("winner_by_best_bf16_fp16_median")
+    if winner:
+        lines.append(
+            f"Winner by BF16/FP16 median TFLOP/s: vboost={winner.get('vboost')} dtype={winner.get('dtype')} n={winner.get('n')} median={winner.get('median_TFLOP_s'):.3f} best={winner.get('best_TFLOP_s'):.3f}"
+        )
+    else:
+        lines.append("Winner by BF16/FP16 median TFLOP/s: unavailable")
+    lines.append("")
+    lines.append("## Best BF16/FP16 median TFLOP/s by vboost")
+    best_pref = summary.get("best_bf16_fp16_median_by_vboost") or []
+    if best_pref:
+        for row in best_pref:
+            lines.append(
+                f"- vboost={row.get('vboost')}: dtype={row.get('dtype')} n={row.get('n')} median={row.get('median_TFLOP_s'):.3f} best={row.get('best_TFLOP_s'):.3f}"
+            )
+    else:
+        lines.append("- unavailable")
+    lines.append("")
+    lines.append("## Run status")
+    for row in summary.get("run_statuses") or []:
+        lines.append(
+            f"- vboost={row.get('vboost')}: status={row.get('status')} set_ok={row.get('set_ok')} before={row.get('before_current')} after={row.get('after_current')}"
+        )
+    write_text(out / "vboost_summary.md", "\n".join(lines) + "\n")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="/results/bench")
@@ -504,6 +592,7 @@ def main():
                     }
                     aggregate["runs"].append(rec)
                     write_json(out / "torch_bench.json", aggregate)
+                    write_vboost_summary(out, aggregate)
                     continue
                 time.sleep(settle_seconds)
             else:
@@ -545,6 +634,7 @@ def main():
             if not aggregate["meta"].get("python") and run_result.get("meta"):
                 aggregate["meta"].update(run_result["meta"])
             write_json(out / "torch_bench.json", aggregate)
+            write_vboost_summary(out, aggregate)
     finally:
         restore_result = None
         if initial_vboost.get("available") and (initial_vboost.get("max_value") is not None or plan_source == "env"):
@@ -555,6 +645,7 @@ def main():
         aggregate["vboost"]["final"] = final_vboost
         write_json(out / "vboost_final.json", final_vboost)
         write_json(out / "torch_bench.json", aggregate)
+        write_vboost_summary(out, aggregate)
 
     print(json.dumps({"wrote": str(out / "torch_bench.json")}, indent=2))
 

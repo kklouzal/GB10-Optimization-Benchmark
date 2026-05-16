@@ -282,6 +282,10 @@ def write_report(root: Path):
     for rel in inspect_paths:
         if (root / rel).exists():
             lines.append(f"- `{rel}`")
+    if (root / "bench" / "vboost_summary.md").exists():
+        lines.append("- `bench/vboost_summary.md`")
+    if (root / "bench" / "vboost_summary.json").exists():
+        lines.append("- `bench/vboost_summary.json`")
     if list((root / "bench").glob("vboost-*/torch_bench.json")):
         lines.append("- `bench/vboost-*/torch_bench.json`")
     if list((root / "bench").glob("vboost-*/nvidia_smi_live.csv")):
