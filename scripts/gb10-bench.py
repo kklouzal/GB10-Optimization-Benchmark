@@ -1,6 +1,25 @@
 #!/usr/bin/env python3
-import argparse, csv, json, math, os, subprocess, sys, threading, time
+import argparse, csv, json, math, os, shutil, subprocess, sys, threading, time
 from pathlib import Path
+
+
+DEFAULT_NVIDIA_SMI_FIELDS = [
+    "timestamp",
+    "pstate",
+    "temperature.gpu",
+    "power.draw",
+    "utilization.gpu",
+    "utilization.memory",
+    "clocks.current.graphics",
+    "clocks.current.sm",
+    "clocks.max.graphics",
+    "clocks_throttle_reasons.active",
+    "clocks_throttle_reasons.sw_power_cap",
+    "clocks_throttle_reasons.hw_power_brake",
+    "clocks_throttle_reasons.hw_slowdown",
+    "clocks_throttle_reasons.sw_thermal_slowdown",
+    "clocks_throttle_reasons.hw_thermal_slowdown",
+]
 
 
 def sh(cmd, timeout=20):
@@ -10,32 +29,92 @@ def sh(cmd, timeout=20):
         return f"ERROR: {e!r}"
 
 
-def nvsmi_query():
-    q = "timestamp,pstate,temperature.gpu,power.draw,utilization.gpu,utilization.memory,clocks.current.graphics,clocks.current.sm,clocks.max.graphics,clocks_throttle_reasons.active,clocks_throttle_reasons.sw_power_cap,clocks_throttle_reasons.hw_power_brake,clocks_throttle_reasons.hw_slowdown,clocks_throttle_reasons.sw_thermal_slowdown,clocks_throttle_reasons.hw_thermal_slowdown"
-    return sh(f"nvidia-smi --query-gpu={q} --format=csv,noheader,nounits", timeout=5).strip()
+def run_cmd(args, timeout=20):
+    try:
+        p = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        return {
+            "ok": p.returncode == 0,
+            "stdout": p.stdout,
+            "stderr": p.stderr,
+            "returncode": p.returncode,
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "stdout": "",
+            "stderr": repr(e),
+            "returncode": None,
+        }
+
+
+def probe_nvsmi_fields(candidates=None):
+    requested = list(candidates or DEFAULT_NVIDIA_SMI_FIELDS)
+    supported = []
+    unsupported = []
+    for field in requested:
+        res = run_cmd(["nvidia-smi", f"--query-gpu={field}", "--format=csv,noheader,nounits"], timeout=5)
+        if res["ok"]:
+            supported.append(field)
+        else:
+            unsupported.append({"field": field, "error": (res["stderr"] or res["stdout"]).strip()})
+    return {"requested": requested, "supported": supported, "unsupported": unsupported}
+
+
+def nvsmi_query(fields):
+    if not fields:
+        return {"fields": [], "row": {}, "error": "no supported nvidia-smi query fields"}
+    res = run_cmd(["nvidia-smi", f"--query-gpu={','.join(fields)}", "--format=csv,noheader,nounits"], timeout=5)
+    if not res["ok"]:
+        return {"fields": list(fields), "row": {}, "error": (res["stderr"] or res["stdout"]).strip()}
+    line = next((ln for ln in res["stdout"].splitlines() if ln.strip()), "").strip()
+    values = [v.strip() for v in line.split(",")]
+    if len(values) != len(fields):
+        return {"fields": list(fields), "row": {}, "error": f"field/value mismatch: expected {len(fields)} values got {len(values)} from {line!r}"}
+    return {"fields": list(fields), "row": dict(zip(fields, values)), "error": None}
 
 
 class Telemetry:
-    def __init__(self, path: Path, interval: float = 0.5):
+    def __init__(self, path: Path, interval: float = 0.5, query_info=None, dmon_path: Path | None = None):
         self.path = path
         self.interval = interval
+        self.query_info = query_info or probe_nvsmi_fields()
+        self.fields = list(self.query_info.get("supported", []))
+        self.dmon_path = dmon_path
         self.stop = threading.Event()
         self.thread = threading.Thread(target=self._run, daemon=True)
+        self.dmon_proc = None
 
     def __enter__(self):
+        if self.dmon_path and shutil.which("nvidia-smi"):
+            try:
+                self.dmon_proc = subprocess.Popen([
+                    "nvidia-smi", "dmon", "-s", os.environ.get("TELEMETRY_DMON_SETS", "pucvmt"),
+                    "-d", os.environ.get("TELEMETRY_DMON_INTERVAL", "1"),
+                    "-o", "DT", "-f", str(self.dmon_path),
+                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                self.dmon_proc = None
         self.thread.start()
         return self
 
     def __exit__(self, *args):
         self.stop.set()
         self.thread.join(timeout=5)
+        if self.dmon_proc is not None:
+            self.dmon_proc.terminate()
+            try:
+                self.dmon_proc.wait(timeout=5)
+            except Exception:
+                self.dmon_proc.kill()
 
     def _run(self):
         with self.path.open("w", newline="") as f:
             w = csv.writer(f)
-            w.writerow(["unix_time", "nvidia_smi_csv"])
+            w.writerow(["unix_time", *self.fields, "error"])
             while not self.stop.is_set():
-                w.writerow([time.time(), nvsmi_query()])
+                sample = nvsmi_query(self.fields)
+                row = [time.time(), *[sample.get("row", {}).get(field, "") for field in self.fields], sample.get("error") or ""]
+                w.writerow(row)
                 f.flush()
                 self.stop.wait(self.interval)
 
@@ -50,8 +129,9 @@ def percentile(xs, p):
     return xs[f] * (c - k) + xs[c] * (k - f)
 
 
-def bench_torch(out: Path):
+def bench_torch(out: Path, query_info=None):
     import torch
+    query_info = query_info or probe_nvsmi_fields()
     meta = {
         "python": sys.version,
         "torch": getattr(torch, "__version__", None),
@@ -61,6 +141,9 @@ def bench_torch(out: Path):
         "env": {k: os.environ.get(k) for k in ["CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES", "OMP_NUM_THREADS", "NCCL_DEBUG", "TORCH_CUDNN_V8_API_LRU_CACHE_LIMIT", "PYTORCH_CUDA_ALLOC_CONF"]},
         "nvidia_smi_start": sh("nvidia-smi", timeout=15),
         "nvidia_smi_q_clock_power": sh("nvidia-smi -q -d CLOCK,POWER,PERFORMANCE 2>/dev/null", timeout=30),
+        "nvidia_smi_query_fields_requested": query_info.get("requested", []),
+        "nvidia_smi_query_fields_supported": query_info.get("supported", []),
+        "nvidia_smi_query_fields_unsupported": query_info.get("unsupported", []),
     }
     if not torch.cuda.is_available():
         (out / "torch_meta.json").write_text(json.dumps(meta, indent=2))
@@ -139,7 +222,7 @@ def bench_torch(out: Path):
                     "best_seconds": min(times) if times else None,
                     "median_TFLOP_s": flops / percentile(times,50) / 1e12 if times else None,
                     "best_TFLOP_s": flops / min(times) / 1e12 if times else None,
-                    "nvidia_smi_after": nvsmi_query(),
+                    "nvidia_smi_after": nvsmi_query(query_info.get("supported", [])),
                 }
                 print(json.dumps({"matmul": rec}, sort_keys=True), flush=True)
                 results["matmul"].append(rec)
@@ -184,7 +267,7 @@ def bench_torch(out: Path):
                         else: h.copy_(d, non_blocking=True)
                         end.record(stream)
                     end.synchronize(); times.append(start.elapsed_time(end)/1000.0)
-                rec={"kind":direction, "MiB":mib, "median_GB_s":(mib*1024*1024)/percentile(times,50)/1e9, "best_GB_s":(mib*1024*1024)/min(times)/1e9, "nvidia_smi_after":nvsmi_query()}
+                rec={"kind":direction, "MiB":mib, "median_GB_s":(mib*1024*1024)/percentile(times,50)/1e9, "best_GB_s":(mib*1024*1024)/min(times)/1e9, "nvidia_smi_after":nvsmi_query(query_info.get("supported", []))}
                 results["bandwidth"].append(rec); print(json.dumps({"bandwidth": rec}, sort_keys=True), flush=True)
             del h,d
             torch.cuda.empty_cache()
@@ -206,8 +289,15 @@ def main():
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
-    with Telemetry(out / "nvidia_smi_live.csv", interval=float(os.environ.get("TELEMETRY_INTERVAL", "0.5"))):
-        result = bench_torch(out)
+    query_info = probe_nvsmi_fields()
+    (out / "nvidia_smi_live.meta.json").write_text(json.dumps(query_info, indent=2))
+    with Telemetry(
+        out / "nvidia_smi_live.csv",
+        interval=float(os.environ.get("TELEMETRY_INTERVAL", "0.5")),
+        query_info=query_info,
+        dmon_path=(out / "nvidia_smi_dmon.csv") if os.environ.get("TELEMETRY_ENABLE_DMON", "1") == "1" else None,
+    ):
+        result = bench_torch(out, query_info=query_info)
 
     (out / "torch_bench.json").write_text(json.dumps(result, indent=2, default=str))
     print(json.dumps({"wrote": str(out / "torch_bench.json")}, indent=2))
