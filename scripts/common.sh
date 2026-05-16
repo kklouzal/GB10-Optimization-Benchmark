@@ -17,7 +17,7 @@ run() {
   local file="$OUT/${rel}.txt"
   mkdir -p "$(dirname "$file")"
   log "$rel"
-  {
+  (
     echo "### $rel"
     echo "### started=$(date -Iseconds)"
     echo "### command=$*"
@@ -28,7 +28,7 @@ run() {
     echo "### exit_status=$ec"
     echo "### ended=$(date -Iseconds)"
     exit "$ec"
-  } >"$file" 2>&1 || true
+  ) >"$file" 2>&1 || true
 }
 
 run_json() {
@@ -54,7 +54,7 @@ run_host() {
   local file="$OUT/${rel}.txt"
   mkdir -p "$(dirname "$file")"
   log "$rel [host]"
-  {
+  (
     echo "### $rel [host namespace]"
     echo "### started=$(date -Iseconds)"
     echo "### command=$*"
@@ -65,7 +65,7 @@ run_host() {
     echo "### exit_status=$ec"
     echo "### ended=$(date -Iseconds)"
     exit "$ec"
-  } >"$file" 2>&1 || true
+  ) >"$file" 2>&1 || true
 }
 
 copy_host_file() {
