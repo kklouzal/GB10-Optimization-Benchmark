@@ -19,8 +19,9 @@ gb10-spark-perf-lab commands:
 Environment:
   GB10_RESULTS=/results                  output root
   GB10_OUT=/results/custom-dir           fixed output dir
-  RUN_DCGM=0|1                           run dcgmi diagnostics if available
+  RUN_DCGM=0|1                           run baked-in in-container DCGM diagnostics
   RUN_DCGM_LEVEL=1|2|3|4                 default 1; higher is heavier
+  DCGM_TIMEOUT=2400                      timeout in seconds for the DCGM run
   RUN_NVBANDWIDTH=1                      run nvbandwidth if installed
   RUN_FIO=0|1                            optional storage test on /results
   RUN_STREAM=1                           run CPU STREAM-like memory test

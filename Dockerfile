@@ -60,6 +60,35 @@ RUN if [[ "${BUILD_NVBANDWIDTH}" == "1" ]]; then \
       echo "Skipping nvbandwidth build"; \
     fi
 
+# Optional: install NVIDIA DCGM directly into the benchmark image so diagnostics
+# can run in-container without a permanently-enabled host service.
+ARG BUILD_DCGM=1
+ARG DCGM_CUDA_MAJOR=13
+ARG CUDA_KEYRING_VERSION=1.1-1
+ARG CUDA_APT_DIST=ubuntu2404
+RUN if [[ "${BUILD_DCGM}" == "1" ]]; then \
+      arch="$(dpkg --print-architecture)" && \
+      case "$arch" in \
+        arm64) cuda_repo_arch=sbsa ;; \
+        amd64) cuda_repo_arch=x86_64 ;; \
+        *) echo "Unsupported architecture for DCGM install: $arch" >&2; exit 1 ;; \
+      esac && \
+      keyring_url="https://developer.download.nvidia.com/compute/cuda/repos/${CUDA_APT_DIST}/${cuda_repo_arch}/cuda-keyring_${CUDA_KEYRING_VERSION}_all.deb" && \
+      wget -qO /tmp/cuda-keyring.deb "$keyring_url" && \
+      dpkg -i /tmp/cuda-keyring.deb && \
+      rm -f /tmp/cuda-keyring.deb && \
+      apt-get update && \
+      apt-get install -y --no-install-recommends \
+        "datacenter-gpu-manager-4-cuda${DCGM_CUDA_MAJOR}" \
+        "datacenter-gpu-manager-4-proprietary-cuda${DCGM_CUDA_MAJOR}" && \
+      dcgmi --version >/tmp/dcgmi-version.txt 2>&1 && \
+      cat /tmp/dcgmi-version.txt && \
+      rm -f /tmp/dcgmi-version.txt ; \
+    else \
+      echo "Skipping DCGM install"; \
+    fi \
+    && rm -rf /var/lib/apt/lists/*
+
 # A tiny native CUDA sanity/memcopy probe. PyTorch benchmarks are richer, but
 # this keeps a low-level CUDA runtime check independent of PyTorch.
 COPY benchmarks/cuda_smoke.cu /opt/gb10-spark-perf-lab/benchmarks/cuda_smoke.cu

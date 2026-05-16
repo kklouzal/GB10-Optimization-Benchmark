@@ -17,9 +17,10 @@ if [[ "${RUN_NVBANDWIDTH:-1}" == "1" ]]; then
 fi
 
 if [[ "${RUN_DCGM:-0}" == "1" ]]; then
-  run bench/dcgm_diag 'if command -v dcgmi >/dev/null; then dcgmi discovery -l 2>/dev/null || true; dcgmi diag -r "${RUN_DCGM_LEVEL:-1}" 2>/dev/null || true; else echo "dcgmi not available in container or host"; fi'
+  log "bench/dcgm"
+  GB10_OUT="$OUT" timeout "${DCGM_TIMEOUT:-2400}" "$LAB_HOME/scripts/dcgm-run.sh" > "$OUT/bench/dcgm_console.txt" 2>&1 || true
 else
-  echo "Set RUN_DCGM=1 RUN_DCGM_LEVEL=1..4 to run DCGM diagnostics if dcgmi is available." > "$OUT/bench/dcgm_SKIPPED.txt"
+  echo "Set RUN_DCGM=1 RUN_DCGM_LEVEL=1..4 to run baked-in in-container DCGM diagnostics." > "$OUT/bench/dcgm_SKIPPED.txt"
 fi
 
 if [[ "${RUN_STREAM:-1}" == "1" ]]; then

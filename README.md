@@ -14,6 +14,8 @@ docker buildx build --platform linux/arm64 \
   --build-arg BASE_IMAGE=nvcr.io/nvidia/pytorch:26.04-py3 \
   --build-arg BUILD_NVBANDWIDTH=1 \
   --build-arg NVBANDWIDTH_REF=v0.9 \
+  --build-arg BUILD_DCGM=1 \
+  --build-arg DCGM_CUDA_MAJOR=13 \
   -t gb10-spark-perf-lab:ngc .
 ```
 
@@ -50,7 +52,7 @@ Upload or share that archive for review. The most important file is `report.md`.
 
 ## Optional heavier diagnostics
 
-DCGM can be expensive and might not be installed in the container/base image. If available:
+DCGM is baked into the benchmark image by default. It is still expensive, so keep it opt-in and run it only with the privileged/host-namespace launch shape shown below:
 
 ```bash
 docker run --rm -it --gpus all \
@@ -112,6 +114,7 @@ NVBANDWIDTH_SAMPLES=5
 NVBANDWIDTH_BUFFER_MB=512
 RUN_DCGM=1
 RUN_DCGM_LEVEL=1
+DCGM_TIMEOUT=2400
 RUN_FIO=1
 RUN_STREAM=1
 REDACT=1
