@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+LAB_HOME="${GB10_LAB_HOME:-/opt/gb10-spark-perf-lab}"
+RESULTS_ROOT="${GB10_RESULTS:-/results}"
+mkdir -p "$RESULTS_ROOT"
+
+usage() {
+  cat <<'USAGE'
+gb10-spark-perf-lab commands:
+  all             collect + benchmark + analyze
+  collect         collect host/container/GPU/firmware/kernel state
+  bench           run PyTorch/CUDA/nvbandwidth/DCGM/fio/STREAM probes where available
+  analyze         create report.md from an existing result directory
+  tune-plan       print supported/experimental tuning candidates; does not apply
+  apply-safe      apply only low-risk runtime knobs; requires GB10_APPLY=1
+  shell           open bash
+
+Environment:
+  GB10_RESULTS=/results                  output root
+  GB10_OUT=/results/custom-dir           fixed output dir
+  RUN_DCGM=0|1                           run dcgmi diagnostics if available
+  RUN_DCGM_LEVEL=1|2|3|4                 default 1; higher is heavier
+  RUN_NVBANDWIDTH=1                      run nvbandwidth if installed
+  RUN_FIO=0|1                            optional storage test on /results
+  RUN_STREAM=1                           run CPU STREAM-like memory test
+  RUN_PROFILING_HINTS=1                  collect nsys/ncu availability
+  BENCH_SECONDS=20                       telemetry benchmark duration per dtype/size family
+  GB10_APPLY=1                           required for apply-safe
+USAGE
+}
+
+cmd="${1:-all}"
+shift || true
+
+case "$cmd" in
+  all)
+    exec "$LAB_HOME/scripts/run-all.sh" "$@"
+    ;;
+  collect)
+    exec "$LAB_HOME/scripts/collect.sh" "$@"
+    ;;
+  bench)
+    exec "$LAB_HOME/scripts/bench.sh" "$@"
+    ;;
+  analyze)
+    exec "$LAB_HOME/scripts/gb10-analyze.py" "$@"
+    ;;
+  tune-plan)
+    exec "$LAB_HOME/scripts/tune-plan.sh" "$@"
+    ;;
+  apply-safe)
+    exec "$LAB_HOME/scripts/apply-safe.sh" "$@"
+    ;;
+  shell|bash)
+    exec /bin/bash "$@"
+    ;;
+  -h|--help|help)
+    usage
+    ;;
+  *)
+    echo "Unknown command: $cmd" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
