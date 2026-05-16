@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-import json, os, re, sys, statistics
-from pathlib import Path
+import json
+import os
+import re
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 
 def read(p: Path, max_bytes=2_000_000):
@@ -17,11 +20,11 @@ def exists_text(root: Path, rel: str):
     return p.exists(), read(p)
 
 
-def grep(text, pattern, flags=re.I|re.M):
+def grep(text, pattern, flags=re.I | re.M):
     return re.findall(pattern, text, flags)
 
 
-def parse_first(text, pattern, default=None, flags=re.I|re.M):
+def parse_first(text, pattern, default=None, flags=re.I | re.M):
     m = re.search(pattern, text, flags)
     return m.group(1).strip() if m else default
 
@@ -67,7 +70,7 @@ def add_findings_from_gpu(root, findings, actions):
     if "power-profiles" in caps.lower() or "Workload Power Profiles" in q:
         actions.append("Inspect `gpu/nvidia_smi_capabilities.txt` for `nvidia-smi power-profiles -l/-ld`. If GB10 exposes a compute or maximum-performance profile, benchmark requested/enforced profile changes explicitly.")
     if "boost-slider" in caps.lower():
-        actions.append("Inspect `nvidia-smi boost-slider -l`; this may be irrelevant for AI compute, but the tool records it because v580 exposes boost-slider/power-hint controls on some GPUs.")
+        actions.append("VBoost is a first-class benchmark dimension in this lab now: compare the built-in sweep results before treating boost-slider as irrelevant for AI compute.")
 
 
 def add_findings_from_host(root, findings, actions):
@@ -79,7 +82,7 @@ def add_findings_from_host(root, findings, actions):
     _, mem = exists_text(root, "mem/hugepages_thp.txt")
     _, fw = exists_text(root, "fw/fwupd.txt")
 
-    dgx = parse_first(platform, r"DGX_OTA_VERSION=\"([^\"]+)\"") or parse_first(platform, r"dgx-release\s+([0-9.]+)")
+    dgx = parse_first(platform, r'DGX_OTA_VERSION="([^"]+)"') or parse_first(platform, r"dgx-release\s+([0-9.]+)")
     if dgx:
         findings.append(f"Detected DGX/Spark software version marker: `{dgx}`.")
 
@@ -91,7 +94,6 @@ def add_findings_from_host(root, findings, actions):
         findings.append(f"Running kernel: `{running_kernel}`.")
     if installed_kernels:
         findings.append(f"Installed NVIDIA kernels include: `{', '.join(installed_kernels[-5:])}`.")
-        # lexicographic is imperfect but catches 1014 vs 1018 class issues
         if running_kernel and running_kernel not in installed_kernels[-1:]:
             actions.append(f"Running kernel `{running_kernel}` may not be the newest installed NVIDIA kernel `{installed_kernels[-1]}`. Reboot/select the newest kernel before performance testing.")
 
@@ -126,6 +128,20 @@ def add_findings_from_host(root, findings, actions):
         actions.append("A/B test Transparent Huge Pages (`madvise` vs `always`) and 1G hugepages for latency-sensitive host staging paths. Do not assume it improves GPU-only workloads.")
 
 
+def flatten_bench_rows(data, key):
+    rows = []
+    runs = data.get("runs") or []
+    if runs:
+        for run in runs:
+            for row in run.get(key, []) or []:
+                merged = dict(row)
+                if run.get("vboost") is not None:
+                    merged.setdefault("vboost", run.get("vboost"))
+                rows.append(merged)
+        return rows
+    return [dict(row) for row in data.get(key, [])]
+
+
 def add_bench_findings(root, findings, actions):
     p = root / "bench" / "torch_bench.json"
     if not p.exists():
@@ -136,23 +152,65 @@ def add_bench_findings(root, findings, actions):
     except Exception as e:
         actions.append(f"Could not parse torch benchmark JSON: {e!r}")
         return
+
     meta = data.get("meta", {})
     findings.append(f"PyTorch={meta.get('torch')} CUDA={meta.get('torch_cuda')} device={meta.get('device_name')} capability={meta.get('device_capability')}.")
-    mat = [x for x in data.get("matmul", []) if x.get("median_TFLOP_s")]
+
+    vboost = data.get("vboost") or {}
+    planned_values = vboost.get("planned_values") or []
+    if planned_values:
+        findings.append(f"Built-in vboost sweep planned values: `{', '.join(str(v) for v in planned_values)}`.")
+    completed_runs = [run for run in (data.get("runs") or []) if run.get("status") == "ok"]
+    if completed_runs:
+        findings.append(f"Completed vboost runs: `{', '.join(str(run.get('vboost')) for run in completed_runs)}`.")
+    restore = vboost.get("restore") or {}
+    if restore and restore.get("ok") is False:
+        actions.append("VBoost restore failed at the end of benchmarking. Inspect `bench/vboost_restore.txt` and `bench/vboost_final.json` before trusting later results.")
+
+    mat = [x for x in flatten_bench_rows(data, "matmul") if x.get("median_TFLOP_s")]
     if mat:
         best = sorted(mat, key=lambda x: x.get("best_TFLOP_s") or 0)[-1]
-        findings.append(f"Best observed matmul: {best.get('dtype')} n={best.get('n')} best={best.get('best_TFLOP_s'):.3f} TFLOP/s median={best.get('median_TFLOP_s'):.3f} TFLOP/s.")
+        vboost_label = f" vboost={best.get('vboost')}" if best.get("vboost") is not None else ""
+        findings.append(
+            f"Best observed matmul{vboost_label}: {best.get('dtype')} n={best.get('n')} best={best.get('best_TFLOP_s'):.3f} TFLOP/s median={best.get('median_TFLOP_s'):.3f} TFLOP/s."
+        )
+
+        preferred = [x for x in mat if x.get("dtype") in {"bf16", "fp16"} and x.get("vboost") is not None]
+        if preferred:
+            per_vboost = {}
+            for row in preferred:
+                score = row.get("median_TFLOP_s") or 0
+                per_vboost[row["vboost"]] = max(score, per_vboost.get(row["vboost"], 0))
+            ordered = sorted(per_vboost.items())
+            findings.append(
+                "Best BF16/FP16 median TFLOP/s by vboost: "
+                + ", ".join(f"{value}={score:.3f}" for value, score in ordered)
+                + "."
+            )
+            best_vboost, best_score = max(ordered, key=lambda item: item[1])
+            baseline = per_vboost.get(0)
+            if baseline and best_vboost != 0:
+                delta_pct = ((best_score - baseline) / baseline) * 100 if baseline else 0.0
+                findings.append(f"Best BF16/FP16 median vboost was `{best_vboost}` ({delta_pct:+.1f}% vs vboost 0).")
+                actions.append("Re-run the real workload at the winning vboost and compare sustained clocks, SW power-cap time, and slowdown reasons before keeping it.")
+            elif baseline:
+                findings.append("Vboost 0 remained the best BF16/FP16 median matmul setting in this sweep.")
+
         bf16 = [x for x in mat if x.get("dtype") == "bf16"]
         fp16 = [x for x in mat if x.get("dtype") == "fp16"]
         if bf16 and fp16:
-            bmax=max(x.get("best_TFLOP_s") or 0 for x in bf16); fmax=max(x.get("best_TFLOP_s") or 0 for x in fp16)
-            if bmax and fmax and min(bmax, fmax)/max(bmax, fmax) < 0.65:
+            bmax = max(x.get("best_TFLOP_s") or 0 for x in bf16)
+            fmax = max(x.get("best_TFLOP_s") or 0 for x in fp16)
+            if bmax and fmax and min(bmax, fmax) / max(bmax, fmax) < 0.65:
                 actions.append("BF16/FP16 performance differs materially. Verify dtype choices, Tensor Core enablement, model kernels, and whether FP4/FP8 paths are actually being used.")
-    bw = [x for x in data.get("bandwidth", []) if x.get("best_GB_s")]
+
+    bw = [x for x in flatten_bench_rows(data, "bandwidth") if x.get("best_GB_s")]
     if bw:
         for kind in sorted(set(x["kind"] for x in bw)):
-            best = max((x.get("best_GB_s") or 0) for x in bw if x["kind"] == kind)
-            findings.append(f"Best PyTorch {kind} bandwidth: {best:.3f} GB/s.")
+            best = max((x for x in bw if x["kind"] == kind), key=lambda x: x.get("best_GB_s") or 0)
+            vboost_label = f" at vboost={best.get('vboost')}" if best.get("vboost") is not None else ""
+            findings.append(f"Best PyTorch {kind} bandwidth{vboost_label}: {best.get('best_GB_s'):.3f} GB/s.")
+
     nv = read(root / "bench" / "nvbandwidth_json.txt", max_bytes=500_000)
     if nv and "nvbandwidth" not in nv.lower() and "error" not in nv.lower():
         findings.append("nvbandwidth output was captured for CUDA copy-path bandwidth analysis.")
@@ -161,7 +219,8 @@ def add_bench_findings(root, findings, actions):
 
 
 def write_report(root: Path):
-    findings=[]; actions=[]
+    findings = []
+    actions = []
     add_findings_from_host(root, findings, actions)
     add_findings_from_gpu(root, findings, actions)
     add_bench_findings(root, findings, actions)
@@ -174,14 +233,15 @@ def write_report(root: Path):
     ]
     experimental = [
         "Clock-lock A/B: reset clocks, run baseline, try `nvidia-smi --lock-gpu-clocks=<min,max> --mode=0`, run identical workload, then `nvidia-smi --reset-gpu-clocks`. Keep only if sustained throughput improves without throttle reasons.",
-        "Power-profile A/B: if `nvidia-smi power-profiles -l/-ld` exposes profiles, test requested/enforced compute profiles and compare telemetry.",
+        "Power-profile A/B: if `nvidia-smi power-profiles -l/-ld` exposes profiles, test requested/enforced profile changes and compare telemetry.",
+        "Vboost A/B: treat the built-in 0..max sweep as required baseline evidence, then confirm the best value with the real workload before keeping it.",
         "Hugepage A/B: test THP `madvise` vs `always`; for latency/RAN-style workloads, test 1G hugepages and Aerial-style kernel arguments in a separate boot entry.",
         "C-state/idle A/B: `idle=poll` can reduce latency but burns power and heat; use only for dedicated latency tests.",
         "IRQ/NIC A/B: if ConnectX traffic matters, test IRQ affinity, interrupt coalescing, relaxed ordering, and mlxconfig changes with before/after network benchmarks.",
         "Disable further security features only on isolated boxes and only when measured; do not mix security changes with clock/power changes in the same A/B run.",
     ]
 
-    lines=[]
+    lines = []
     lines.append("# GB10 Spark Perf Lab Report")
     lines.append("")
     lines.append(f"Generated: {datetime.now(timezone.utc).isoformat()}")
@@ -191,10 +251,11 @@ def write_report(root: Path):
     lines.extend([f"- {x}" for x in findings] or ["- No findings generated; check collection completeness."])
     lines.append("")
     lines.append("## Action candidates")
-    seen=set()
+    seen = set()
     for x in actions:
         if x not in seen:
-            lines.append(f"- {x}"); seen.add(x)
+            lines.append(f"- {x}")
+            seen.add(x)
     if not actions:
         lines.append("- No immediate corrective actions detected. Focus on workload-level profiling and A/B tuning.")
     lines.append("")
@@ -205,13 +266,26 @@ def write_report(root: Path):
     lines.extend([f"- {x}" for x in experimental])
     lines.append("")
     lines.append("## Files to inspect first")
-    for rel in [
-        "host/platform.txt", "apt/installed_versions.txt", "kernel/cmdline_config.txt",
-        "gpu/nvidia_smi_q.txt", "gpu/nvidia_smi_capabilities.txt", "bench/torch_bench.json",
-        "bench/nvidia_smi_live.csv", "bench/nvbandwidth_json.txt", "fw/fwupd.txt",
-        "logs/dmesg_power_thermal_pcie.txt", "logs/journal_warnings.txt",
-    ]:
-        if (root/rel).exists(): lines.append(f"- `{rel}`")
+    inspect_paths = [
+        "host/platform.txt",
+        "apt/installed_versions.txt",
+        "kernel/cmdline_config.txt",
+        "gpu/nvidia_smi_q.txt",
+        "gpu/nvidia_smi_capabilities.txt",
+        "bench/torch_bench.json",
+        "bench/nvidia_smi_live.csv",
+        "bench/nvbandwidth_json.txt",
+        "fw/fwupd.txt",
+        "logs/dmesg_power_thermal_pcie.txt",
+        "logs/journal_warnings.txt",
+    ]
+    for rel in inspect_paths:
+        if (root / rel).exists():
+            lines.append(f"- `{rel}`")
+    if list((root / "bench").glob("vboost-*/torch_bench.json")):
+        lines.append("- `bench/vboost-*/torch_bench.json`")
+    if list((root / "bench").glob("vboost-*/nvidia_smi_live.csv")):
+        lines.append("- `bench/vboost-*/nvidia_smi_live.csv`")
     report = "\n".join(lines) + "\n"
     (root / "report.md").write_text(report)
     print(report)
@@ -223,6 +297,7 @@ def main():
         print(f"Result directory does not exist: {root}", file=sys.stderr)
         sys.exit(2)
     write_report(root)
+
 
 if __name__ == "__main__":
     main()

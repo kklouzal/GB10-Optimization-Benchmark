@@ -27,6 +27,8 @@ Environment:
   RUN_STREAM=1                           run CPU STREAM-like memory test
   RUN_PROFILING_HINTS=1                  collect nsys/ncu availability
   BENCH_SECONDS=20                       telemetry benchmark duration per dtype/size family
+  GB10_VBOOST_VALUES=auto                auto-sweep 0..advertised vboost max by default
+  GB10_VBOOST_SETTLE_S=5                 seconds to settle after each vboost change
   GB10_APPLY=1                           required for apply-safe
 USAGE
 }

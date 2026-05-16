@@ -58,7 +58,7 @@ docker run --rm -it --gpus all \
   gb10-spark-perf-lab:ngc all
 ```
 
-The resulting archive now also includes an automatic reboot/preflight snapshot, run context, and before/after GPU state snapshots.
+The resulting archive now also includes an automatic reboot/preflight snapshot, run context, before/after GPU state snapshots, and a first-class per-vboost sweep that tests every advertised vboost value from 0 through the reported max.
 
 The container prints an archive path like:
 
@@ -112,8 +112,10 @@ gb10-lab apply-safe # low-risk runtime knobs only; requires GB10_APPLY=1
 
 Every run now records:
 - a concise reboot/preflight snapshot (`host/reboot_preflight.txt`)
-- benchmark run context including profile/cpuset/DCGM settings (`bench/run_context.txt`)
+- benchmark run context including profile/cpuset/DCGM settings and vboost plan (`bench/run_context.txt`)
 - GPU state before and after the benchmark (`bench/gpu_state_before.txt`, `bench/gpu_state_after.txt`)
+- top-level boost-slider snapshots (`bench/boost_slider_before.txt`, `bench/boost_slider_after.txt`)
+- per-vboost subdirectories with `torch_bench.json`, `torch_meta.json`, `nvidia_smi_live.csv`, and `nvidia_smi_dmon.csv`
 - memory, swap, running containers, and top CPU consumers after the run
 
 ## Why privileged?
@@ -131,6 +133,7 @@ Do not mix changes. Establish a baseline, change one variable, run the same benc
 
 ## What it benchmarks
 
+- A built-in vboost sweep that tests every advertised value from `0..max` and records separate telemetry/artifacts for each setting.
 - PyTorch GEMM throughput for TF32/FP32/BF16/FP16 across configurable matrix sizes.
 - PyTorch device-to-device and pinned host-to-device/device-to-host copy bandwidth.
 - NVIDIA nvbandwidth when built into the image.
@@ -146,6 +149,8 @@ Do not mix changes. Establish a baseline, change one variable, run the same benc
 BENCH_SIZES=4096,8192,12288,16384
 BENCH_SECONDS=20
 BENCH_MAX_ALLOC_FRAC=0.55
+GB10_VBOOST_VALUES=auto
+GB10_VBOOST_SETTLE_S=5
 NVBANDWIDTH_SAMPLES=5
 NVBANDWIDTH_BUFFER_MB=512
 GB10_PROFILE=perf-cores-runtime-maxperf

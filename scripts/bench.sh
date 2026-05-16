@@ -16,6 +16,8 @@ run_stream=${RUN_STREAM:-1}
 run_fio=${RUN_FIO:-0}
 bench_seconds=${BENCH_SECONDS:-20}
 bench_sizes=${BENCH_SIZES:-4096,8192,12288,16384}
+vboost_values=${GB10_VBOOST_VALUES:-auto}
+vboost_settle_s=${GB10_VBOOST_SETTLE_S:-5}
 shm_hint=${GB10_SHM_SIZE:-unspecified}
 omp_num_threads=${OMP_NUM_THREADS:-unset}
 malloc_arena_max=${MALLOC_ARENA_MAX:-unset}
@@ -55,6 +57,7 @@ docker ps
 ps -eo pid,ppid,psr,pcpu,pmem,comm,args --sort=-pcpu | head -n 40
 '
 run_host bench/gpu_state_before 'nvidia-smi -q -d PERFORMANCE,CLOCK,POWER,TEMPERATURE 2>/dev/null || true'
+run bench/boost_slider_before 'nvidia-smi boost-slider -l 2>/dev/null || true'
 
 run bench/cuda_smoke 'if command -v gb10-cuda-smoke >/dev/null; then gb10-cuda-smoke; else echo "gb10-cuda-smoke not available"; fi'
 
@@ -104,6 +107,7 @@ else
 fi
 
 run_host bench/gpu_state_after 'nvidia-smi -q -d PERFORMANCE,CLOCK,POWER,TEMPERATURE 2>/dev/null || true'
+run bench/boost_slider_after 'nvidia-smi boost-slider -l 2>/dev/null || true'
 run_host bench/system_state_after '
 free -h
 swapon --show

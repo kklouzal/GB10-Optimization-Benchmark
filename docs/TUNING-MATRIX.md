@@ -25,7 +25,7 @@ This is the human A/B checklist that the container report is built around.
 - `nvidia-smi --lock-gpu-clocks` / `--reset-gpu-clocks`.
 - `nvidia-smi power-profiles` if GB10 exposes workload profiles.
 - `nvidia-smi power-smoothing` query; do not set without A/B evidence.
-- `nvidia-smi boost-slider` query; likely not primary for AI compute.
+- `nvidia-smi boost-slider` / vboost sweep; compare all advertised values before assuming it is irrelevant for AI compute.
 - `nvidia-smi prm` Blackwell counters for diagnostics.
 
 ## Host memory/latency knobs
