@@ -23,10 +23,10 @@ int main() {
   for (int dev = 0; dev < count; ++dev) {
     cudaDeviceProp p{};
     CHECK(cudaGetDeviceProperties(&p, dev));
-    std::printf("device=%d name=%s cc=%d.%d sms=%d global_mem_gib=%.2f l2_bytes=%zu mem_clock_khz=%d bus_width_bits=%d\n",
+    std::printf("device=%d name=%s cc=%d.%d sms=%d global_mem_gib=%.2f l2_bytes=%zu bus_width_bits=%d\n",
       dev, p.name, p.major, p.minor, p.multiProcessorCount,
       (double)p.totalGlobalMem / 1024.0 / 1024.0 / 1024.0,
-      (size_t)p.l2CacheSize, p.memoryClockRate, p.memoryBusWidth);
+      (size_t)p.l2CacheSize, p.memoryBusWidth);
   }
   if (count == 0) return 0;
 
