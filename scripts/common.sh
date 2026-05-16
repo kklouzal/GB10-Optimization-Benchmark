@@ -95,7 +95,11 @@ redact_tree() {
 }
 
 archive_out() {
+  local tar_path="${OUT}.tar"
+  local gz_path="${tar_path}.gz"
   redact_tree
-  tar -C "$(dirname "$OUT")" -czf "${OUT}.tar.gz" "$(basename "$OUT")"
-  echo "${OUT}.tar.gz"
+  rm -f "$tar_path" "$gz_path"
+  tar -C "$(dirname "$OUT")" -cf "$tar_path" "$(basename "$OUT")"
+  gzip -f "$tar_path"
+  echo "$gz_path"
 }
