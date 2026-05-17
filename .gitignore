@@ -1,6 +1,6 @@
 results/
 .run-logs/
-*.tar.gz
+.build-logs/
 __pycache__/
 *.pyc
 .DS_Store
