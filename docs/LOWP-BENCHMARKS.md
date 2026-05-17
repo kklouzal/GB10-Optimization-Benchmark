@@ -13,14 +13,14 @@ The goal is not to reproduce NVIDIA marketing sparse FP4 TOPS. The reported metr
 
 ## Default behavior
 
-`RUN_LOWP=1` runs one low-precision pass at the current vboost value. This is intentional: the main BF16/FP16 benchmark already has a first-class vboost sweep, and low-precision benchmarking can be expensive.
+When the full bench suite runs with `RUN_LOWP=1`, the low-precision benchmark now runs after the dense GEMM section for each vboost level in the main sweep. This makes dense-vs-lowp comparisons possible per vboost. The standalone `lowp` command still supports running only the current vboost or its own explicit sweep.
 
 ```bash
 -e RUN_LOWP=1 \
 -e LOWP_VBOOST_VALUES=current
 ```
 
-To sweep every advertised vboost value specifically for FP8/MXFP8/NVFP4:
+To sweep every advertised vboost value specifically for standalone FP8/MXFP8/NVFP4 runs:
 
 ```bash
 -e LOWP_VBOOST_VALUES=auto

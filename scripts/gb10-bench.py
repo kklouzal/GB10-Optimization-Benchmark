@@ -265,7 +265,7 @@ def bench_torch(out: Path, query_info=None, *, vboost_value=None, vboost_state=N
     }
     if not torch.cuda.is_available():
         write_json(out / "torch_meta.json", meta)
-        return {"meta": meta, "matmul": [], "bandwidth": [], "allocator": []}
+        return {"meta": meta, "matmul": [], "bandwidth": [], "allocator": [], "lowp": {"enabled": False, "skipped": True, "reason": "torch.cuda.is_available() is False"}}
 
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
@@ -293,7 +293,7 @@ def bench_torch(out: Path, query_info=None, *, vboost_value=None, vboost_state=N
     except Exception as e:
         meta["triton"] = f"not importable: {e!r}"
 
-    results = {"meta": meta, "matmul": [], "bandwidth": [], "allocator": []}
+    results = {"meta": meta, "matmul": [], "bandwidth": [], "allocator": [], "lowp": None}
     write_json(out / "torch_meta.json", meta)
 
     sizes = [int(x) for x in os.environ.get("BENCH_SIZES", "4096,8192,12288,16384").split(",") if x.strip()]
@@ -358,6 +358,8 @@ def bench_torch(out: Path, query_info=None, *, vboost_value=None, vboost_state=N
                     torch.cuda.empty_cache()
                 except Exception:
                     pass
+
+    results["lowp"] = run_lowp_after_matmul(out.parent, out, vboost_value)
 
     for mib in [256, 1024, 4096, 8192]:
         numel = mib * 1024 * 1024 // 4
@@ -524,6 +526,46 @@ def write_vboost_summary(out: Path, aggregate):
             f"- vboost={row.get('vboost')}: status={row.get('status')} set_ok={row.get('set_ok')} before={row.get('before_current')} after={row.get('after_current')}"
         )
     write_text(out / "vboost_summary.md", "\n".join(lines) + "\n")
+
+
+def run_lowp_after_matmul(bench_out: Path, run_dir: Path, vboost_value):
+    if os.environ.get("RUN_LOWP", "1") != "1":
+        write_text(bench_out / "lowp_SKIPPED.txt", "Set RUN_LOWP=1 to run FP8/MXFP8/NVFP4 low-precision benchmarks after each dense vboost lane.\n")
+        return {"enabled": False, "skipped": True, "reason": "RUN_LOWP!=1"}
+
+    lowp_out = bench_out / "lowp"
+    lowp_out.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["LOWP_VBOOST_VALUES"] = "current" if vboost_value is None else str(vboost_value)
+    env["LOWP_APPEND_RESULTS"] = "1"
+    env["LOWP_VBOOST_SETTLE_S"] = "0"
+    lab_home = env.get("GB10_LAB_HOME", "/opt/gb10-spark-perf-lab")
+    cmd = [sys.executable, f"{lab_home}/scripts/gb10-lowp-bench.py", "--out", str(lowp_out)]
+    stdout_path = run_dir / "lowp_bench_stdout.txt"
+    stderr_path = run_dir / "lowp_bench_stderr.txt"
+    timeout_seconds = int(float(os.environ.get("LOWP_BENCH_TIMEOUT", "3600")))
+    try:
+        with stdout_path.open("w") as so, stderr_path.open("w") as se:
+            proc = subprocess.run(cmd, stdout=so, stderr=se, text=True, env=env, timeout=timeout_seconds)
+        return {
+            "enabled": True,
+            "command": cmd,
+            "returncode": proc.returncode,
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
+            "out": str(lowp_out),
+        }
+    except subprocess.TimeoutExpired as e:
+        write_text(stderr_path, f"LOWP benchmark timed out after {timeout_seconds}s\n{e}\n")
+        return {
+            "enabled": True,
+            "timed_out": True,
+            "timeout_seconds": timeout_seconds,
+            "command": cmd,
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
+            "out": str(lowp_out),
+        }
 
 
 def main():

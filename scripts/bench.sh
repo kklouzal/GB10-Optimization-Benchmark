@@ -80,16 +80,6 @@ run bench/cuda_smoke 'if command -v gb10-cuda-smoke >/dev/null; then gb10-cuda-s
 log "running PyTorch benchmark"
 timeout "${BENCH_TIMEOUT:-1800}" python3 "$LAB_HOME/scripts/gb10-bench.py" --out "$OUT/bench" > "$OUT/bench/torch_bench_stdout.txt" 2> "$OUT/bench/torch_bench_stderr.txt" || true
 
-# --- gb10-lowp-tunables-addon: lowp begin ---
-if [[ "${RUN_LOWP:-1}" == "1" ]]; then
-  log "running low-precision FP8/MXFP8/NVFP4 benchmark"
-  mkdir -p "$OUT/bench/lowp"
-  timeout "${LOWP_BENCH_TIMEOUT:-3600}" python3 "$LAB_HOME/scripts/gb10-lowp-bench.py" --out "$OUT/bench/lowp" > "$OUT/bench/lowp_bench_stdout.txt" 2> "$OUT/bench/lowp_bench_stderr.txt" || true
-else
-  echo "Set RUN_LOWP=1 to run FP8/MXFP8/NVFP4 low-precision benchmarks." > "$OUT/bench/lowp_SKIPPED.txt"
-fi
-# --- gb10-lowp-tunables-addon: lowp end ---
-
 
 if [[ "${RUN_NVBANDWIDTH:-1}" == "1" ]]; then
   run bench/nvbandwidth_list 'command -v nvbandwidth && nvbandwidth -l || true'

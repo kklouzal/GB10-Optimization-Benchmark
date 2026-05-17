@@ -827,6 +827,38 @@ def summarize_runs(out: Path, meta: Dict[str, Any], runs: List[Dict[str, Any]]) 
     return summary
 
 
+def load_existing_summary(out: Path) -> tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+    p = out / "lowp_bench.json"
+    if not p.exists():
+        return None, []
+    try:
+        data = json.loads(p.read_text())
+    except Exception:  # noqa: BLE001
+        return None, []
+    if not isinstance(data, dict):
+        return None, []
+    runs = data.get("runs")
+    if not isinstance(runs, list):
+        runs = []
+    meta = data.get("meta") if isinstance(data.get("meta"), dict) else None
+    return meta, runs
+
+
+def upsert_run(runs: List[Dict[str, Any]], run: Dict[str, Any]) -> List[Dict[str, Any]]:
+    label = str(run.get("label"))
+    kept = [r for r in runs if str(r.get("label")) != label]
+    kept.append(run)
+
+    def sort_key(row: Dict[str, Any]) -> tuple[int, Any]:
+        value = row.get("vboost")
+        if value is None:
+            return (1, str(row.get("label")))
+        return (0, value)
+
+    kept.sort(key=sort_key)
+    return kept
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="/results/bench/lowp")
@@ -834,13 +866,16 @@ def main() -> None:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
+    append_existing = getenv_bool("LOWP_APPEND_RESULTS", False)
+    existing_meta, runs = load_existing_summary(out) if append_existing else (None, [])
+
     cfg = build_config()
     nvsmi_probe = probe_nvsmi_fields()
     initial_vboost = query_vboost_state()
     vboost_values, vboost_source = parse_vboost_values(os.environ.get("LOWP_VBOOST_VALUES", "current"), initial_vboost)
     restore_target = initial_vboost.get("current_value")
 
-    meta: Dict[str, Any] = {
+    current_meta: Dict[str, Any] = {
         "tool": "gb10-lowp-bench",
         "started_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "python": sys.version,
@@ -868,26 +903,38 @@ def main() -> None:
     try:
         import torch
 
-        meta["torch_cuda_available"] = torch.cuda.is_available()
-        meta["torch_version"] = getattr(torch, "__version__", None)
-        meta["torch_cuda_version"] = getattr(torch.version, "cuda", None)
-        meta["device_count"] = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        current_meta["torch_cuda_available"] = torch.cuda.is_available()
+        current_meta["torch_version"] = getattr(torch, "__version__", None)
+        current_meta["torch_cuda_version"] = getattr(torch.version, "cuda", None)
+        current_meta["device_count"] = torch.cuda.device_count() if torch.cuda.is_available() else 0
         if torch.cuda.is_available():
-            meta["device_name"] = torch.cuda.get_device_name(0)
-            meta["device_capability"] = torch.cuda.get_device_capability(0)
+            current_meta["device_name"] = torch.cuda.get_device_name(0)
+            current_meta["device_capability"] = torch.cuda.get_device_capability(0)
             props = torch.cuda.get_device_properties(0)
-            meta["device_total_memory"] = props.total_memory
+            current_meta["device_total_memory"] = props.total_memory
     except Exception as e:  # noqa: BLE001
-        meta["torch_probe_error"] = repr(e)
+        current_meta["torch_probe_error"] = repr(e)
 
+    meta: Dict[str, Any] = existing_meta or current_meta
+    if append_existing:
+        meta["append_mode"] = True
+        invocations = list(meta.get("append_invocations") or [])
+        invocations.append({
+            "started_utc": current_meta.get("started_utc"),
+            "vboost_values": vboost_values,
+            "vboost_source": vboost_source,
+            "config": current_meta.get("config"),
+        })
+        meta["append_invocations"] = invocations
+        meta["latest_invocation"] = invocations[-1]
+        meta.setdefault("module_versions", current_meta.get("module_versions"))
+        meta.setdefault("trtllm_probe", current_meta.get("trtllm_probe"))
     write_json(out / "lowp_meta.json", meta)
 
-    runs: List[Dict[str, Any]] = []
     try:
         for value in vboost_values:
-            runs.append(run_one_vboost(out, cfg, value, nvsmi_probe.get("supported", DEFAULT_NVIDIA_SMI_FIELDS)))
+            runs = upsert_run(runs, run_one_vboost(out, cfg, value, nvsmi_probe.get("supported", DEFAULT_NVIDIA_SMI_FIELDS)))
             summary = summarize_runs(out, meta, runs)
-            # update incrementally so partial results survive interruptions
             write_json(out / "lowp_bench.json", summary)
     finally:
         if restore_target is not None and any(v is not None for v in vboost_values):

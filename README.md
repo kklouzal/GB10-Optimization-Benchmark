@@ -208,7 +208,7 @@ The suite can now collect workload-relevant low-precision data in addition to BF
 -e LOWP_SHAPES='1024x8192x8192,2048x8192x8192,4096x8192x8192,8192x8192x8192'
 ```
 
-For a low-precision-specific vboost sweep, set `LOWP_VBOOST_VALUES=auto` or a roundtrip sequence such as `LOWP_VBOOST_VALUES=0,3,4,3,0`. Outputs are written under `bench/lowp/`; see `docs/LOWP-BENCHMARKS.md`.
+For standalone low-precision sweeps, set `LOWP_VBOOST_VALUES=auto` or a roundtrip sequence such as `LOWP_VBOOST_VALUES=0,3,4,3,0`. Outputs are written under `bench/lowp/`; see `docs/LOWP-BENCHMARKS.md`.
 
 ## Tunability matrix
 
