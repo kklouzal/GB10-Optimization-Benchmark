@@ -11,6 +11,8 @@ gb10-spark-perf-lab commands:
   all             collect + benchmark + analyze
   collect         collect host/container/GPU/firmware/kernel state
   bench           run PyTorch/CUDA/nvbandwidth/DCGM/fio/STREAM probes where available
+  lowp            run only the FP8/MXFP8/NVFP4 low-precision benchmark
+  tunables        generate tunability matrix only
   analyze         create report.md from an existing result directory
   tune-plan       print supported/experimental tuning candidates; does not apply
   apply-safe      apply only low-risk runtime knobs; requires GB10_APPLY=1
@@ -29,6 +31,11 @@ Environment:
   BENCH_SECONDS=20                       telemetry benchmark duration per dtype/size family
   GB10_VBOOST_VALUES=auto                auto-sweep 0..advertised vboost max by default
   GB10_VBOOST_SETTLE_S=5                 seconds to settle after each vboost change
+  RUN_TUNABLES=1                         collect tunability matrix
+  RUN_LOWP=1                             run FP8/MXFP8/NVFP4 low-precision benchmarks
+  LOWP_VBOOST_VALUES=current             current|auto|roundtrip|0,3,4,3,0
+  LOWP_SECONDS=12                        seconds per low-precision case
+  LOWP_SHAPES=...                        comma-separated N or MxNxK shapes
   GB10_APPLY=1                           required for apply-safe
 USAGE
 }
@@ -45,6 +52,14 @@ case "$cmd" in
     ;;
   bench)
     exec "$LAB_HOME/scripts/bench.sh" "$@"
+    ;;
+  lowp)
+    out="${GB10_OUT:-${RESULTS_ROOT}/gb10-lowp-$(date -u +%Y%m%dT%H%M%SZ)}"
+    exec python3 "$LAB_HOME/scripts/gb10-lowp-bench.py" --out "$out" "$@"
+    ;;
+  tunables)
+    out="${GB10_OUT:-${RESULTS_ROOT}/gb10-tunables-$(date -u +%Y%m%dT%H%M%SZ)}"
+    exec python3 "$LAB_HOME/scripts/gb10-tunables.py" --out "$out" "$@"
     ;;
   analyze)
     exec "$LAB_HOME/scripts/gb10-analyze.py" "$@"

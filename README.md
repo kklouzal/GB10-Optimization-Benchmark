@@ -195,3 +195,29 @@ By default the collector redacts common IPs, MACs, serial numbers, and token-lik
 ## License
 
 Apache-2.0.
+
+<!-- gb10-lowp-tunables-addon -->
+## Low-precision FP8 / MXFP8 / NVFP4 benchmarking
+
+The suite can now collect workload-relevant low-precision data in addition to BF16/FP16/TF32 GEMM stress results. This is important for GB10 workloads that use MXFP8, NVFP4, FP8 KV cache, or mixed BF16/low-precision execution.
+
+```bash
+-e RUN_LOWP=1 \
+-e LOWP_VBOOST_VALUES=current \
+-e LOWP_SECONDS=20 \
+-e LOWP_SHAPES='1024x8192x8192,2048x8192x8192,4096x8192x8192,8192x8192x8192'
+```
+
+For a low-precision-specific vboost sweep, set `LOWP_VBOOST_VALUES=auto` or a roundtrip sequence such as `LOWP_VBOOST_VALUES=0,3,4,3,0`. Outputs are written under `bench/lowp/`; see `docs/LOWP-BENCHMARKS.md`.
+
+## Tunability matrix
+
+The suite can also produce a read-only inventory of exposed performance knobs: GPU boost/clock/power-profile capabilities, sysctl state, THP/hugepages, CPU idle/frequency knobs, fan/PWM exposure, PCIe power state, container limits, and tool availability.
+
+```bash
+gb10-lab tunables
+# or in a full run
+-e RUN_TUNABLES=1
+```
+
+Outputs are written under `tunables/`; see `docs/MAXPERF-TUNING-MATRIX.md`.

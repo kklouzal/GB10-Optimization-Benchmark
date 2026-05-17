@@ -25,7 +25,6 @@ SAFE_NVIDIA_SMI_FIELDS = [
     "clocks.max.graphics",
     "clocks_throttle_reasons.active",
     "clocks_throttle_reasons.sw_power_cap",
-    "clocks_throttle_reasons.hw_power_brake",
     "clocks_throttle_reasons.hw_slowdown",
     "clocks_throttle_reasons.sw_thermal_slowdown",
     "clocks_throttle_reasons.hw_thermal_slowdown",

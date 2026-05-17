@@ -18,6 +18,11 @@ bench_seconds=${BENCH_SECONDS:-20}
 bench_sizes=${BENCH_SIZES:-4096,8192,12288,16384}
 vboost_values=${GB10_VBOOST_VALUES:-auto}
 vboost_settle_s=${GB10_VBOOST_SETTLE_S:-5}
+run_tunables=${RUN_TUNABLES:-1}
+run_lowp=${RUN_LOWP:-1}
+lowp_vboost_values=${LOWP_VBOOST_VALUES:-current}
+lowp_seconds=${LOWP_SECONDS:-12}
+lowp_shapes=${LOWP_SHAPES:-default}
 shm_hint=${GB10_SHM_SIZE:-unspecified}
 omp_num_threads=${OMP_NUM_THREADS:-unset}
 malloc_arena_max=${MALLOC_ARENA_MAX:-unset}
@@ -59,10 +64,32 @@ ps -eo pid,ppid,psr,pcpu,pmem,comm,args --sort=-pcpu | head -n 40
 run_host bench/gpu_state_before 'nvidia-smi -q -d PERFORMANCE,CLOCK,POWER,TEMPERATURE 2>/dev/null || true'
 run bench/boost_slider_before 'nvidia-smi boost-slider -l 2>/dev/null || true'
 
+# --- gb10-lowp-tunables-addon: tunables begin ---
+if [[ "${RUN_TUNABLES:-1}" == "1" ]]; then
+  log "collecting tunability matrix"
+  mkdir -p "$OUT/tunables"
+  timeout "${TUNABLES_TIMEOUT:-600}" python3 "$LAB_HOME/scripts/gb10-tunables.py" --out "$OUT/tunables" > "$OUT/tunables/tunables_stdout.txt" 2> "$OUT/tunables/tunables_stderr.txt" || true
+else
+  echo "Set RUN_TUNABLES=1 to collect the tunability matrix." > "$OUT/tunables_SKIPPED.txt"
+fi
+# --- gb10-lowp-tunables-addon: tunables end ---
+
+
 run bench/cuda_smoke 'if command -v gb10-cuda-smoke >/dev/null; then gb10-cuda-smoke; else echo "gb10-cuda-smoke not available"; fi'
 
 log "running PyTorch benchmark"
 timeout "${BENCH_TIMEOUT:-1800}" python3 "$LAB_HOME/scripts/gb10-bench.py" --out "$OUT/bench" > "$OUT/bench/torch_bench_stdout.txt" 2> "$OUT/bench/torch_bench_stderr.txt" || true
+
+# --- gb10-lowp-tunables-addon: lowp begin ---
+if [[ "${RUN_LOWP:-1}" == "1" ]]; then
+  log "running low-precision FP8/MXFP8/NVFP4 benchmark"
+  mkdir -p "$OUT/bench/lowp"
+  timeout "${LOWP_BENCH_TIMEOUT:-3600}" python3 "$LAB_HOME/scripts/gb10-lowp-bench.py" --out "$OUT/bench/lowp" > "$OUT/bench/lowp_bench_stdout.txt" 2> "$OUT/bench/lowp_bench_stderr.txt" || true
+else
+  echo "Set RUN_LOWP=1 to run FP8/MXFP8/NVFP4 low-precision benchmarks." > "$OUT/bench/lowp_SKIPPED.txt"
+fi
+# --- gb10-lowp-tunables-addon: lowp end ---
+
 
 if [[ "${RUN_NVBANDWIDTH:-1}" == "1" ]]; then
   run bench/nvbandwidth_list 'command -v nvbandwidth && nvbandwidth -l || true'
@@ -117,6 +144,7 @@ ps -eo pid,ppid,psr,pcpu,pmem,comm,args --sort=-pcpu | head -n 40
 
 if [[ "$NO_ARCHIVE" == "0" ]]; then
   "$LAB_HOME/scripts/gb10-analyze.py" "$OUT" || true
+python3 "$LAB_HOME/scripts/gb10-report-append.py" "$OUT" || true
   archive="$(archive_out)"
   log "created archive: $archive"
   echo "$archive"

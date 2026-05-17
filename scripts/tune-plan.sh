@@ -66,4 +66,23 @@ cat /sys/kernel/mm/transparent_hugepage/defrag
 #   -e CUDA_DEVICE_MAX_CONNECTIONS=1 \
 #   -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 #   <ngc-image> <your-command>
+
+
+## 7. Low-precision workload-relevant A/B
+# BF16/FP16 GEMM exposes throttling. Actual GB10 LLM workloads should also test:
+#   FP8 static GEMM
+#   FP8 dynamic activation + static weight
+#   Transformer Engine FP8 delayed scaling
+#   Transformer Engine MXFP8 block scaling
+#   Transformer Engine NVFP4 block scaling
+# Example:
+#   RUN_LOWP=1 LOWP_VBOOST_VALUES=current gb10-lab bench
+# Sweep vboost specifically for low precision:
+#   LOWP_VBOOST_VALUES=0,3,4,3,0 gb10-lab lowp
+
+## 8. Tunability matrix
+# Generate a read-only inventory of exposed GPU/kernel/sysfs/container knobs:
+#   gb10-lab tunables
+# or inside full runs:
+#   RUN_TUNABLES=1 gb10-lab all
 PLAN

@@ -85,7 +85,7 @@ for u in nvidia-persistenced nv-cpu-governor nvidia-disable-init-on-alloc nvidia
 run gpu/nvidia_smi_summary 'nvidia-smi; nvidia-smi -L; nvidia-smi topo -m 2>/dev/null || true; nvidia-smi topo -p2p r 2>/dev/null || true; nvidia-smi topo -nvme 2>/dev/null || true'
 run gpu/nvidia_smi_q 'nvidia-smi -q'
 run gpu/nvidia_smi_xml 'nvidia-smi -q -x'
-run gpu/nvidia_smi_query_once 'nvidia-smi --query-gpu=index,timestamp,name,uuid,pci.bus_id,driver_version,pstate,temperature.gpu,power.draw,power.limit,clocks.current.graphics,clocks.current.sm,clocks.current.memory,clocks.applications.graphics,clocks.max.graphics,utilization.gpu,utilization.memory,clocks_throttle_reasons.active,clocks_throttle_reasons.sw_power_cap,clocks_throttle_reasons.hw_power_brake,clocks_throttle_reasons.hw_slowdown,clocks_throttle_reasons.sw_thermal_slowdown,clocks_throttle_reasons.hw_thermal_slowdown --format=csv 2>&1 || true'
+run gpu/nvidia_smi_query_once 'nvidia-smi --query-gpu=index,timestamp,name,uuid,pci.bus_id,driver_version,pstate,temperature.gpu,power.draw,power.limit,clocks.current.graphics,clocks.current.sm,clocks.current.memory,clocks.applications.graphics,clocks.max.graphics,utilization.gpu,utilization.memory,clocks_throttle_reasons.active,clocks_throttle_reasons.sw_power_cap,clocks_throttle_reasons.hw_slowdown,clocks_throttle_reasons.sw_thermal_slowdown,clocks_throttle_reasons.hw_thermal_slowdown --format=csv 2>&1 || true'
 run gpu/nvidia_smi_capabilities '
 printf "== supported clocks ==\n"; nvidia-smi -q -d SUPPORTED_CLOCKS 2>/dev/null || true
 printf "\n== power ==\n"; nvidia-smi -q -d POWER 2>/dev/null || true
@@ -98,7 +98,7 @@ printf "\n== power hint ==\n"; nvidia-smi power-hint -l 2>/dev/null || true
 printf "\n== rusd ==\n"; nvidia-smi rusd -h 2>/dev/null | head -n 120 || true
 printf "\n== prm ==\n"; nvidia-smi prm -l 2>/dev/null || true
 '
-run gpu/nvidia_idle_loop_60s 'for i in $(seq 1 60); do printf "%s," "$(date +%s.%N)"; nvidia-smi --query-gpu=temperature.gpu,utilization.gpu,utilization.memory,power.draw,pstate,clocks.current.graphics,clocks.current.sm,clocks.applications.graphics,clocks.max.graphics,clocks_throttle_reasons.active,clocks_throttle_reasons.sw_power_cap,clocks_throttle_reasons.hw_power_brake,clocks_throttle_reasons.hw_slowdown --format=csv,noheader,nounits 2>/dev/null || true; sleep 1; done'
+run gpu/nvidia_idle_loop_60s 'for i in $(seq 1 60); do printf "%s," "$(date +%s.%N)"; nvidia-smi --query-gpu=temperature.gpu,utilization.gpu,utilization.memory,power.draw,pstate,clocks.current.graphics,clocks.current.sm,clocks.applications.graphics,clocks.max.graphics,clocks_throttle_reasons.active,clocks_throttle_reasons.sw_power_cap,clocks_throttle_reasons.hw_slowdown --format=csv,noheader,nounits 2>/dev/null || true; sleep 1; done'
 run gpu/nvidia_dmon_idle_60s 'timeout 65s nvidia-smi dmon -s pucvmt -d 1 2>&1 || true'
 run gpu/nvlink_c2c 'nvidia-smi nvlink --status 2>/dev/null || true; nvidia-smi nvlink --info 2>/dev/null || true; nvidia-smi nvlink --capabilities 2>/dev/null || true; nvidia-smi c2c -s 2>/dev/null || true'
 
@@ -187,6 +187,15 @@ for m in mods:
         print(f"{m}: missing/error {e!r}")
 PY
 '
+
+
+# --- gb10-lowp-tunables-addon: collect tunables begin ---
+if [[ "${RUN_TUNABLES:-1}" == "1" ]]; then
+  log "tunables matrix"
+  mkdir -p "$OUT/tunables"
+  timeout "${TUNABLES_TIMEOUT:-600}" python3 "$LAB_HOME/scripts/gb10-tunables.py" --out "$OUT/tunables" > "$OUT/tunables/tunables_stdout.txt" 2> "$OUT/tunables/tunables_stderr.txt" || true
+fi
+# --- gb10-lowp-tunables-addon: collect tunables end ---
 
 run logs/dmesg_power_thermal_pcie 'dmesg -T 2>/dev/null | grep -Ei "nvidia|nvlink|c2c|power|brake|cap|throttle|clock|thermal|temperature|fan|pcie|pci|pd|usb|type.?c|mlx|mellanox|connectx|nvme|iommu|ats|error|fail|warn|firmware|fwupd" | tail -n 3000 || true'
 run_host logs/journal_warnings 'journalctl -b -p warning --no-pager 2>/dev/null | tail -n 3000 || true'

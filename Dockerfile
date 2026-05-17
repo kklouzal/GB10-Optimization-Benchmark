@@ -100,10 +100,12 @@ RUN if command -v nvcc >/dev/null 2>&1; then \
 
 COPY scripts/ /opt/gb10-spark-perf-lab/scripts/
 COPY docs/ /opt/gb10-spark-perf-lab/docs/
-RUN chmod +x /opt/gb10-spark-perf-lab/scripts/*.sh && \
+RUN chmod +x /opt/gb10-spark-perf-lab/scripts/*.sh /opt/gb10-spark-perf-lab/scripts/*.py && \
     ln -sf /opt/gb10-spark-perf-lab/scripts/entrypoint.sh /usr/local/bin/gb10-lab && \
     ln -sf /opt/gb10-spark-perf-lab/scripts/gb10-bench.py /usr/local/bin/gb10-bench && \
-    ln -sf /opt/gb10-spark-perf-lab/scripts/gb10-analyze.py /usr/local/bin/gb10-analyze
+    ln -sf /opt/gb10-spark-perf-lab/scripts/gb10-analyze.py /usr/local/bin/gb10-analyze && \
+    ln -sf /opt/gb10-spark-perf-lab/scripts/gb10-lowp-bench.py /usr/local/bin/gb10-lowp-bench && \
+    ln -sf /opt/gb10-spark-perf-lab/scripts/gb10-tunables.py /usr/local/bin/gb10-tunables
 
 WORKDIR /workspace
 ENTRYPOINT ["/opt/gb10-spark-perf-lab/scripts/entrypoint.sh"]
