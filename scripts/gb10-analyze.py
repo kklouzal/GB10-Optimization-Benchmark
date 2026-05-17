@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import math
 import os
 import re
 import sys
@@ -27,6 +28,106 @@ def grep(text, pattern, flags=re.I | re.M):
 def parse_first(text, pattern, default=None, flags=re.I | re.M):
     m = re.search(pattern, text, flags)
     return m.group(1).strip() if m else default
+
+
+def parse_last(text, pattern, default=None, flags=re.I | re.M):
+    matches = re.findall(pattern, text, flags)
+    if not matches:
+        return default
+    last = matches[-1]
+    return last.strip() if isinstance(last, str) else last[0].strip()
+
+
+def extract_json_object(text):
+    match = re.search(r'(?ms)^\{.*^\}\s*(?=^### exit_status=|\Z)', text)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except Exception:
+            pass
+    start = text.find('{')
+    end = text.rfind('}')
+    if start < 0 or end < 0 or end <= start:
+        return None
+    try:
+        return json.loads(text[start:end + 1])
+    except Exception:
+        return None
+
+
+def fmt_gbs(value):
+    try:
+        return f"{float(value):.1f}"
+    except Exception:
+        return None
+
+
+def summarize_nvbandwidth(text):
+    parsed = extract_json_object(text)
+    if not isinstance(parsed, dict):
+        return None
+    root = parsed.get('nvbandwidth') or {}
+    tests = root.get('testcases') or []
+    by_name = {t.get('name'): t for t in tests if isinstance(t, dict) and t.get('name')}
+
+    def passed_values(*names):
+        vals = []
+        for name in names:
+            row = by_name.get(name)
+            if row and row.get('status') == 'Passed' and row.get('sum') is not None:
+                vals.append(float(row.get('sum')))
+        return vals
+
+    ce_h2d = passed_values('host_to_device_memcpy_ce')
+    ce_d2h = passed_values('device_to_host_memcpy_ce')
+    sm_h2d = passed_values('host_to_device_memcpy_sm', 'host_to_all_memcpy_sm')
+    sm_d2h = passed_values('device_to_host_memcpy_sm', 'all_to_host_memcpy_sm')
+    sm_bidir = passed_values('host_to_all_bidirectional_memcpy_sm', 'all_to_host_bidirectional_memcpy_sm', 'host_to_device_bidirectional_memcpy_sm', 'device_to_host_bidirectional_memcpy_sm')
+    local_copy = passed_values('device_local_copy')
+    exit_status = parse_first(text, r'### exit_status=(\d+)', default=None)
+    return {
+        'exit_status': int(exit_status) if exit_status is not None else None,
+        'ce_h2d': max(ce_h2d) if ce_h2d else None,
+        'ce_d2h': max(ce_d2h) if ce_d2h else None,
+        'sm_h2d': max(sm_h2d) if sm_h2d else None,
+        'sm_d2h': max(sm_d2h) if sm_d2h else None,
+        'sm_bidir_min': min(sm_bidir) if sm_bidir else None,
+        'sm_bidir_max': max(sm_bidir) if sm_bidir else None,
+        'device_local_copy': max(local_copy) if local_copy else None,
+    }
+
+
+def classify_lowp_issue(row):
+    error_text = str(row.get('error') or row.get('reason') or '')
+    suite = str(row.get('suite') or '')
+    if suite.startswith('torch_scaled_mm_fp8') and 'Invalid scaling configuration' in error_text:
+        return 'PyTorch FP8 failed: invalid scale dtype/configuration'
+    if suite == 'te_mxfp8_block_e4m3' and 'not supported on 12.0+ architectures yet' in error_text:
+        return 'TE MXFP8 failed: architecture support message'
+    if suite == 'te_nvfp4_block' and 'invalid argument' in error_text.lower():
+        return 'TE NVFP4 failed: CUDA invalid argument'
+    if row.get('error'):
+        return f"{suite or 'unknown'} failed"
+    if row.get('skipped'):
+        return f"{suite or 'unknown'} skipped"
+    return None
+
+
+def summarize_lowp_failures(records):
+    counts = {}
+    error_count = 0
+    skipped_count = 0
+    for row in records:
+        if row.get('error'):
+            error_count += 1
+        elif row.get('skipped'):
+            skipped_count += 1
+        else:
+            continue
+        label = classify_lowp_issue(row) or 'Other low-precision failure/skip'
+        counts[label] = counts.get(label, 0) + 1
+    ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    return ordered, error_count, skipped_count
 
 
 def add_findings_from_gpu(root, findings, actions):
@@ -82,7 +183,7 @@ def add_findings_from_host(root, findings, actions):
     _, mem = exists_text(root, "mem/hugepages_thp.txt")
     _, fw = exists_text(root, "fw/fwupd.txt")
 
-    dgx = parse_first(platform, r'DGX_OTA_VERSION="([^"]+)"') or parse_first(platform, r"dgx-release\s+([0-9.]+)")
+    dgx = parse_last(platform, r'DGX_OTA_VERSION="([^"]+)"') or parse_first(platform, r"dgx-release\s+([0-9.]+)")
     if dgx:
         findings.append(f"Detected DGX/Spark software version marker: `{dgx}`.")
 
@@ -212,10 +313,45 @@ def add_bench_findings(root, findings, actions):
             findings.append(f"Best PyTorch {kind} bandwidth{vboost_label}: {best.get('best_GB_s'):.3f} GB/s.")
 
     nv = read(root / "bench" / "nvbandwidth_json.txt", max_bytes=500_000)
-    if nv and "nvbandwidth" not in nv.lower() and "error" not in nv.lower():
-        findings.append("nvbandwidth output was captured for CUDA copy-path bandwidth analysis.")
+    nv_summary = summarize_nvbandwidth(nv) if nv else None
+    if nv_summary and (nv_summary.get("exit_status") in (None, 0)):
+        parts = []
+        if nv_summary.get("ce_h2d") is not None:
+            parts.append(f"CE H2D ~{fmt_gbs(nv_summary['ce_h2d'])} GB/s")
+        if nv_summary.get("ce_d2h") is not None:
+            parts.append(f"CE D2H ~{fmt_gbs(nv_summary['ce_d2h'])} GB/s")
+        if nv_summary.get("sm_h2d") is not None:
+            parts.append(f"SM H2D ~{fmt_gbs(nv_summary['sm_h2d'])} GB/s")
+        if nv_summary.get("sm_d2h") is not None:
+            parts.append(f"SM D2H ~{fmt_gbs(nv_summary['sm_d2h'])} GB/s")
+        if nv_summary.get("sm_bidir_min") is not None:
+            if math.isclose(nv_summary['sm_bidir_min'], nv_summary['sm_bidir_max'], rel_tol=1e-6):
+                parts.append(f"bidirectional SM ~{fmt_gbs(nv_summary['sm_bidir_max'])} GB/s")
+            else:
+                parts.append(f"bidirectional SM ~{fmt_gbs(nv_summary['sm_bidir_min'])}–{fmt_gbs(nv_summary['sm_bidir_max'])} GB/s")
+        if nv_summary.get("device_local_copy") is not None:
+            parts.append(f"device local copy ~{fmt_gbs(nv_summary['device_local_copy'])} GB/s")
+        if parts:
+            findings.append("nvbandwidth passed: " + "; ".join(parts) + ".")
+        else:
+            findings.append("nvbandwidth completed successfully; inspect `bench/nvbandwidth_json.txt` for detailed copy-path results.")
     elif (root / "bench" / "nvbandwidth_json.txt").exists():
-        actions.append("nvbandwidth ran but may have errored. Check `bench/nvbandwidth_json.txt`; it is the best next-level probe for memory-copy bandwidth.")
+        actions.append("nvbandwidth did not yield a clean parsed success result. Check `bench/nvbandwidth_json.txt`; it is the best next-level probe for memory-copy bandwidth.")
+
+    lowp_path = root / "bench" / "lowp" / "lowp_bench.json"
+    if lowp_path.exists():
+        try:
+            lowp = json.loads(lowp_path.read_text())
+        except Exception as e:
+            actions.append(f"Could not parse low-precision benchmark JSON: {e!r}")
+        else:
+            records = lowp.get('records') or []
+            scored = [r for r in records if r.get('median_TFLOP_s_dense_equiv') is not None]
+            failure_categories, error_count, skipped_count = summarize_lowp_failures(records)
+            failed_or_error = error_count + skipped_count
+            findings.append(f"Low-precision results: {len(scored)} scored record(s), {failed_or_error} failed/error record(s).")
+            for label, count in failure_categories[:5]:
+                findings.append(f"Low-precision issue: {count}x {label}.")
 
 
 def write_report(root: Path):

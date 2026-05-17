@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-LAB_HOME="${GB10_LAB_HOME:-/opt/gb10-spark-perf-lab}"
+LAB_HOME="${GB10_LAB_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 RESULTS_ROOT="${GB10_RESULTS:-/results}"
 TS="${GB10_TS:-$(date -u +%Y%m%dT%H%M%SZ)}"
 HOSTNAME_SAFE="$(hostname -s 2>/dev/null | tr -c 'A-Za-z0-9_.-' '_' || echo host)"
@@ -81,17 +81,7 @@ copy_host_file() {
 redact_tree() {
   [[ "${REDACT:-1}" == "1" ]] || return 0
   log "redacting common serial/IP/MAC/token fields"
-  while IFS= read -r -d '' f; do
-    grep -Iq . "$f" || continue
-    sed -i -E \
-      -e 's/([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}/<MAC>/g' \
-      -e 's/([0-9]{1,3}\.){3}[0-9]{1,3}/<IPv4>/g' \
-      -e 's/(DGX_SERIAL_NUMBER=)"[^"]*"/\1"<REDACTED>"/g' \
-      -e 's/(Serial Number[[:space:]]*:[[:space:]]*).*/\1<REDACTED>/Ig' \
-      -e 's/(serial[[:space:]]*[:=][[:space:]]*).*/\1<REDACTED>/Ig' \
-      -e 's/(token|password|passwd|secret|apikey|api_key)([[:space:]]*[:=][[:space:]]*)[^[:space:]]+/\1\2<REDACTED>/Ig' \
-      "$f" 2>/dev/null || true
-  done < <(find "$OUT" -type f -size -30M -print0)
+  python3 "$LAB_HOME/scripts/redact-results.py" "$OUT"
 }
 
 archive_out() {

@@ -739,6 +739,39 @@ def run_one_vboost(out: Path, cfg: Config, vboost: Optional[int], nvsmi_fields: 
     return run
 
 
+def classify_lowp_issue(row: Dict[str, Any]) -> Optional[str]:
+    error_text = str(row.get("error") or row.get("reason") or "")
+    suite = str(row.get("suite") or "")
+    if suite.startswith("torch_scaled_mm_fp8") and "Invalid scaling configuration" in error_text:
+        return "PyTorch FP8 failed: invalid scale dtype/configuration"
+    if suite == "te_mxfp8_block_e4m3" and "not supported on 12.0+ architectures yet" in error_text:
+        return "TE MXFP8 failed: architecture support message"
+    if suite == "te_nvfp4_block" and "invalid argument" in error_text.lower():
+        return "TE NVFP4 failed: CUDA invalid argument"
+    if row.get("error"):
+        return f"{suite or 'unknown'} failed: {error_text.splitlines()[0][:140]}"
+    if row.get("skipped"):
+        return f"{suite or 'unknown'} skipped: {str(row.get('reason') or 'unspecified')[:140]}"
+    return None
+
+
+def summarize_lowp_failures(records: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], int, int]:
+    failure_counts: Dict[str, int] = {}
+    error_count = 0
+    skipped_count = 0
+    for row in records:
+        if row.get("error"):
+            error_count += 1
+        elif row.get("skipped"):
+            skipped_count += 1
+        else:
+            continue
+        label = classify_lowp_issue(row) or "Other low-precision failure/skip"
+        failure_counts[label] = failure_counts.get(label, 0) + 1
+    ordered = sorted(failure_counts.items(), key=lambda item: (-item[1], item[0]))
+    return ([{"label": label, "count": count} for label, count in ordered], error_count, skipped_count)
+
+
 def summarize_runs(out: Path, meta: Dict[str, Any], runs: List[Dict[str, Any]]) -> Dict[str, Any]:
     records: List[Dict[str, Any]] = []
     for run in runs:
@@ -748,6 +781,8 @@ def summarize_runs(out: Path, meta: Dict[str, Any], runs: List[Dict[str, Any]]) 
             row.setdefault("vboost_label", run.get("label"))
             records.append(row)
     scored = [r for r in records if r.get("median_TFLOP_s_dense_equiv") is not None]
+    failure_categories, error_count, skipped_count = summarize_lowp_failures(records)
+    failed_or_error_count = error_count + skipped_count
     best_by_suite: Dict[str, Dict[str, Any]] = {}
     for row in scored:
         key = str(row.get("suite") or "unknown")
@@ -764,6 +799,10 @@ def summarize_runs(out: Path, meta: Dict[str, Any], runs: List[Dict[str, Any]]) 
         "meta": meta,
         "record_count": len(records),
         "scored_count": len(scored),
+        "failed_or_error_count": failed_or_error_count,
+        "error_count": error_count,
+        "skipped_count": skipped_count,
+        "failure_categories": failure_categories,
         "best_by_suite": best_by_suite,
         "best_by_vboost": best_by_vboost,
         "runs": runs,
@@ -771,7 +810,6 @@ def summarize_runs(out: Path, meta: Dict[str, Any], runs: List[Dict[str, Any]]) 
     }
     write_json(out / "lowp_bench.json", summary)
 
-    # TSV for quick spreadsheet import.
     tsv_fields = [
         "vboost_label",
         "suite",
@@ -791,14 +829,23 @@ def summarize_runs(out: Path, meta: Dict[str, Any], runs: List[Dict[str, Any]]) 
         "error",
     ]
     with (out / "lowp_summary.tsv").open("w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=tsv_fields, extrasaction="ignore", delimiter="\t")
+        w = csv.DictWriter(f, fieldnames=tsv_fields, extrasaction="ignore", delimiter="	")
         w.writeheader()
         for row in records:
             w.writerow(row)
 
     lines = ["# Low-precision FP8 / MXFP8 / NVFP4 benchmark summary", ""]
-    lines.append(f"Records: {len(records)}; scored: {len(scored)}")
+    lines.append(f"Records: {len(records)}")
+    lines.append(f"Scored records: {len(scored)}")
+    lines.append(f"Failed/error records: {failed_or_error_count}")
+    if skipped_count:
+        lines.append(f"Skipped records: {skipped_count}")
     lines.append("")
+    if failure_categories:
+        lines.append("## Failure/error summary")
+        for item in failure_categories:
+            lines.append(f"- {item['count']}x {item['label']}")
+        lines.append("")
     lines.append("## Best result by suite")
     if best_by_suite:
         for suite, row in sorted(best_by_suite.items()):

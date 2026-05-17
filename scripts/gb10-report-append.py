@@ -33,6 +33,39 @@ def fmt_num(x: Any, digits: int = 3) -> str:
         return "n/a"
 
 
+def classify_lowp_issue(row: Dict[str, Any]) -> str | None:
+    error_text = str(row.get("error") or row.get("reason") or "")
+    suite = str(row.get("suite") or "")
+    if suite.startswith("torch_scaled_mm_fp8") and "Invalid scaling configuration" in error_text:
+        return "PyTorch FP8 failed: invalid scale dtype/configuration"
+    if suite == "te_mxfp8_block_e4m3" and "not supported on 12.0+ architectures yet" in error_text:
+        return "TE MXFP8 failed: architecture support message"
+    if suite == "te_nvfp4_block" and "invalid argument" in error_text.lower():
+        return "TE NVFP4 failed: CUDA invalid argument"
+    if row.get("error"):
+        return f"{suite or 'unknown'} failed"
+    if row.get("skipped"):
+        return f"{suite or 'unknown'} skipped"
+    return None
+
+
+def summarize_lowp_failures(records: List[Dict[str, Any]]) -> tuple[List[tuple[str, int]], int, int]:
+    counts: Dict[str, int] = {}
+    error_count = 0
+    skipped_count = 0
+    for row in records:
+        if row.get("error"):
+            error_count += 1
+        elif row.get("skipped"):
+            skipped_count += 1
+        else:
+            continue
+        label = classify_lowp_issue(row) or "Other low-precision failure/skip"
+        counts[label] = counts.get(label, 0) + 1
+    ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    return ordered, error_count, skipped_count
+
+
 def lowp_section(root: Path) -> str:
     p = root / "bench" / "lowp" / "lowp_bench.json"
     if not p.exists():
@@ -41,7 +74,18 @@ def lowp_section(root: Path) -> str:
     lines: List[str] = ["", "## Low-precision FP8 / MXFP8 / NVFP4 results", ""]
     records = data.get("records") or []
     scored = [r for r in records if r.get("median_TFLOP_s_dense_equiv") is not None]
-    lines.append(f"Low-precision records: `{len(records)}` total, `{len(scored)}` scored.")
+    failure_categories, error_count, skipped_count = summarize_lowp_failures(records)
+    failed_or_error_count = error_count + skipped_count
+    lines.append(f"Low-precision records: `{len(records)}` total.")
+    lines.append(f"Scored records: `{len(scored)}`.")
+    lines.append(f"Failed/error records: `{failed_or_error_count}`.")
+    if skipped_count:
+        lines.append(f"Skipped records: `{skipped_count}`.")
+    if failure_categories:
+        lines.append("")
+        lines.append("Main low-precision failure modes:")
+        for label, count in failure_categories[:8]:
+            lines.append(f"- `{count}x` {label}")
     best_by_suite = data.get("best_by_suite") or {}
     if best_by_suite:
         lines.append("")
