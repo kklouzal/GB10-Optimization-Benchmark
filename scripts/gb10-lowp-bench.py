@@ -340,6 +340,74 @@ def set_gpu_clock_lock(range_spec: str) -> Dict[str, Any]:
     return run_cmd(["nvidia-smi", f"--lock-gpu-clocks={range_spec}", "--mode=0"], timeout=20)
 
 
+def parse_clock_snapshot(q_text: str) -> Dict[str, Any]:
+    def extract(label: str) -> Optional[float]:
+        m = re.search(rf"{label}\s*:\s*([0-9]+) MHz", q_text, re.I)
+        return float(m.group(1)) if m else None
+
+    pstate = None
+    m = re.search(r"Performance State\s*:\s*(P\d+)", q_text, re.I)
+    if m:
+        pstate = m.group(1)
+    return {
+        "pstate": pstate,
+        "current_graphics_mhz": extract("Graphics"),
+        "current_sm_mhz": extract("SM"),
+        "app_graphics_mhz": extract("Applications Clocks(?:\s*(?:\n.*)*?)?Graphics"),
+        "max_graphics_mhz": extract("Max Clocks(?:\s*(?:\n.*)*?)?Graphics"),
+    }
+
+
+def evaluate_gpu_clock_lock(range_spec: Optional[str], q_text: str, telemetry_summary: Optional[Dict[str, Any]] = None, tolerance_mhz: float = 30.0) -> Dict[str, Any]:
+    snap = parse_clock_snapshot(q_text)
+    if range_spec is None:
+        return {
+            "requested": None,
+            "requested_label": "stock",
+            "effective": True,
+            "reason": "stock/reset baseline",
+            "snapshot": snap,
+        }
+    req_min, req_max = [float(x) for x in range_spec.split(",", 1)]
+    current_vals = [v for v in [snap.get("current_graphics_mhz"), snap.get("current_sm_mhz")] if v is not None]
+    in_range = any((req_min - tolerance_mhz) <= v <= (req_max + tolerance_mhz) for v in current_vals)
+    telemetry_peak = None
+    telemetry_p95 = None
+    if telemetry_summary:
+        peaks = []
+        p95s = []
+        for field in ["clocks.current.graphics", "clocks.current.sm"]:
+            stats = telemetry_summary.get(field) or {}
+            if isinstance(stats, dict):
+                if stats.get("max") is not None:
+                    peaks.append(float(stats["max"]))
+                if stats.get("p95") is not None:
+                    p95s.append(float(stats["p95"]))
+        if peaks:
+            telemetry_peak = max(peaks)
+        if p95s:
+            telemetry_p95 = max(p95s)
+    if in_range:
+        return {
+            "requested": range_spec,
+            "requested_label": gpu_clock_lock_label(range_spec),
+            "effective": True,
+            "reason": "pre-run clock snapshot fell within requested lock range",
+            "snapshot": snap,
+            "telemetry_peak_mhz": telemetry_peak,
+            "telemetry_p95_mhz": telemetry_p95,
+        }
+    return {
+        "requested": range_spec,
+        "requested_label": gpu_clock_lock_label(range_spec),
+        "effective": False,
+        "reason": "pre-run clock snapshot did not move into requested lock range",
+        "snapshot": snap,
+        "telemetry_peak_mhz": telemetry_peak,
+        "telemetry_p95_mhz": telemetry_p95,
+    }
+
+
 def parse_gpu_clock_lock_values(raw: str) -> Tuple[List[Optional[str]], str]:
     raw = (raw or "").strip()
     if not raw or raw.lower() in {"none", "off", "disabled"}:
@@ -366,7 +434,7 @@ def parse_gpu_clock_lock_values(raw: str) -> Tuple[List[Optional[str]], str]:
 
 
 def gpu_clock_lock_label(range_spec: Optional[str]) -> str:
-    return "reset" if range_spec is None else range_spec.replace(",", "-")
+    return "stock" if range_spec is None else range_spec.replace(",", "-")
 
 
 def parse_vboost_values(raw: str, initial: Dict[str, Any]) -> Tuple[List[Optional[int]], str]:
@@ -748,15 +816,40 @@ def run_one_vboost(out: Path, cfg: Config, vboost: Optional[int], nvsmi_fields: 
         time.sleep(getenv_float("LOWP_VBOOST_SETTLE_S", getenv_float("GB10_VBOOST_SETTLE_S", 5.0)))
     before = query_vboost_state()
     write_json(run_dir / "vboost_before.json", before)
-    write_text(run_dir / "nvidia_smi_q_before.txt", sh("nvidia-smi -q -d CLOCK,POWER,PERFORMANCE,TEMPERATURE", timeout=30))
+    write_text(run_dir / "vboost_before_q.txt", sh("nvidia-smi -q -d CLOCK,POWER,PERFORMANCE,TEMPERATURE", timeout=30))
+    write_text(run_dir / "boost_slider_before.txt", command_output(run_cmd(["nvidia-smi", "boost-slider", "-l"], timeout=10)))
 
     total_mem = torch.cuda.get_device_properties(0).total_memory if torch.cuda.is_available() else 0
     clock_lock_runs: List[Dict[str, Any]] = []
     records: List[Dict[str, Any]] = []
+    lock_control_supported = True
     for clock_lock in cfg.gpu_clock_locks:
         lock_label = gpu_clock_lock_label(clock_lock)
         lock_dir = run_dir / f"lock-{lock_label}"
         lock_dir.mkdir(parents=True, exist_ok=True)
+        if clock_lock is not None and not lock_control_supported:
+            rec = {
+                "suite": "all",
+                "vboost": vboost,
+                "vboost_label": label,
+                "gpu_clock_lock": clock_lock,
+                "gpu_clock_lock_label": lock_label,
+                "gpu_clock_lock_effective": False,
+                "skipped": True,
+                "reason": "skipped because earlier lock-gpu-clocks attempt for this vboost lane did not take effect",
+            }
+            lock_run = {
+                "gpu_clock_lock": clock_lock,
+                "gpu_clock_lock_label": lock_label,
+                "effective": False,
+                "short_circuited": True,
+                "records": [rec],
+            }
+            write_json(lock_dir / "lowp_bench.json", lock_run)
+            clock_lock_runs.append(lock_run)
+            records.append(rec)
+            continue
+
         reset_before = reset_gpu_clocks()
         write_text(lock_dir / "gpu_clock_reset_before.txt", command_output(reset_before))
         lock_result = None
@@ -770,6 +863,7 @@ def run_one_vboost(out: Path, cfg: Config, vboost: Optional[int], nvsmi_fields: 
                     "vboost_label": label,
                     "gpu_clock_lock": clock_lock,
                     "gpu_clock_lock_label": lock_label,
+                    "gpu_clock_lock_effective": False,
                     "skipped": True,
                     "reason": f"lock-gpu-clocks failed: {command_output(lock_result)}",
                 }
@@ -777,14 +871,46 @@ def run_one_vboost(out: Path, cfg: Config, vboost: Optional[int], nvsmi_fields: 
                     "gpu_clock_lock": clock_lock,
                     "gpu_clock_lock_label": lock_label,
                     "set_result": lock_result,
+                    "effective": False,
                     "records": [rec],
                 }
                 write_json(lock_dir / "lowp_bench.json", lock_run)
                 clock_lock_runs.append(lock_run)
                 records.append(rec)
+                lock_control_supported = False
                 continue
         time.sleep(cfg.gpu_clock_settle_s)
-        write_text(lock_dir / "nvidia_smi_q_before.txt", sh("nvidia-smi -q -d CLOCK,POWER,PERFORMANCE,TEMPERATURE", timeout=30))
+        q_before = sh("nvidia-smi -q -d CLOCK,POWER,PERFORMANCE,TEMPERATURE", timeout=30)
+        write_text(lock_dir / "nvidia_smi_q_before.txt", q_before)
+        write_text(lock_dir / "boost_slider_before.txt", command_output(run_cmd(["nvidia-smi", "boost-slider", "-l"], timeout=10)))
+        lock_probe_pre = evaluate_gpu_clock_lock(clock_lock, q_before)
+        write_json(lock_dir / "gpu_clock_probe_before.json", lock_probe_pre)
+
+        if clock_lock is not None and not lock_probe_pre.get("effective"):
+            rec = {
+                "suite": "all",
+                "vboost": vboost,
+                "vboost_label": label,
+                "gpu_clock_lock": clock_lock,
+                "gpu_clock_lock_label": lock_label,
+                "gpu_clock_lock_effective": False,
+                "skipped": True,
+                "reason": f"requested clock lock did not appear to apply: {lock_probe_pre.get('reason')}",
+            }
+            lock_run = {
+                "gpu_clock_lock": clock_lock,
+                "gpu_clock_lock_label": lock_label,
+                "set_result": lock_result,
+                "effective": False,
+                "probe_before": lock_probe_pre,
+                "records": [rec],
+            }
+            write_json(lock_dir / "lowp_bench.json", lock_run)
+            clock_lock_runs.append(lock_run)
+            records.append(rec)
+            lock_control_supported = False
+            continue
+
         lock_records: List[Dict[str, Any]] = []
         live_path = lock_dir / "lowp_nvidia_smi_live.csv"
         dmon_path = lock_dir / "lowp_nvidia_smi_dmon.csv"
@@ -799,13 +925,19 @@ def run_one_vboost(out: Path, cfg: Config, vboost: Optional[int], nvsmi_fields: 
                 lock_records.extend(run_te_lowp(cfg, total_mem, vboost))
             else:
                 lock_records.append({"suite": "all", "vboost": vboost, "skipped": True, "reason": "torch.cuda.is_available() is False"})
+        q_after = sh("nvidia-smi -q -d CLOCK,POWER,PERFORMANCE,TEMPERATURE", timeout=30)
+        write_text(lock_dir / "nvidia_smi_q_after.txt", q_after)
+        write_text(lock_dir / "boost_slider_after.txt", command_output(run_cmd(["nvidia-smi", "boost-slider", "-l"], timeout=10)))
+        tel_summary = summarize_telemetry(live_path)
+        lock_probe_after = evaluate_gpu_clock_lock(clock_lock, q_after, tel_summary)
+        write_json(lock_dir / "gpu_clock_probe_after.json", lock_probe_after)
+        effective = bool(lock_probe_after.get("effective") if clock_lock is not None else True)
         for rec in lock_records:
             rec.setdefault("vboost", vboost)
             rec.setdefault("vboost_label", label)
             rec["gpu_clock_lock"] = clock_lock
             rec["gpu_clock_lock_label"] = lock_label
-        write_text(lock_dir / "nvidia_smi_q_after.txt", sh("nvidia-smi -q -d CLOCK,POWER,PERFORMANCE,TEMPERATURE", timeout=30))
-        tel_summary = summarize_telemetry(live_path)
+            rec["gpu_clock_lock_effective"] = effective
         reset_after = reset_gpu_clocks()
         write_text(lock_dir / "gpu_clock_reset_after.txt", command_output(reset_after))
         lock_run = {
@@ -814,22 +946,29 @@ def run_one_vboost(out: Path, cfg: Config, vboost: Optional[int], nvsmi_fields: 
             "set_result": lock_result,
             "reset_before": reset_before,
             "reset_after": reset_after,
+            "probe_before": lock_probe_pre,
+            "probe_after": lock_probe_after,
+            "effective": effective,
             "telemetry_summary": tel_summary,
             "records": lock_records,
         }
         write_json(lock_dir / "lowp_bench.json", lock_run)
         clock_lock_runs.append(lock_run)
         records.extend(lock_records)
+        if clock_lock is not None and not effective:
+            lock_control_supported = False
 
     after = query_vboost_state()
     write_json(run_dir / "vboost_after.json", after)
-    write_text(run_dir / "nvidia_smi_q_after.txt", sh("nvidia-smi -q -d CLOCK,POWER,PERFORMANCE,TEMPERATURE", timeout=30))
+    write_text(run_dir / "vboost_after_q.txt", sh("nvidia-smi -q -d CLOCK,POWER,PERFORMANCE,TEMPERATURE", timeout=30))
+    write_text(run_dir / "boost_slider_after.txt", command_output(run_cmd(["nvidia-smi", "boost-slider", "-l"], timeout=10)))
     run = {
         "vboost": vboost,
         "label": label,
         "set_result": set_result,
         "vboost_before": before,
         "vboost_after": after,
+        "clock_control_supported": lock_control_supported,
         "clock_lock_runs": clock_lock_runs,
         "records": records,
     }
