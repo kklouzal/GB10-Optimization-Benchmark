@@ -253,6 +253,9 @@ def bench_torch(out: Path, query_info=None, *, vboost_value=None, vboost_state=N
                 "NCCL_DEBUG",
                 "TORCH_CUDNN_V8_API_LRU_CACHE_LIMIT",
                 "PYTORCH_CUDA_ALLOC_CONF",
+                "RUN_MATMUL",
+                "RUN_COPY_BENCH",
+                "LOWP_GPU_CLOCK_LOCKS",
             ]
         },
         "vboost_value": vboost_value,
@@ -303,117 +306,92 @@ def bench_torch(out: Path, query_info=None, *, vboost_value=None, vboost_state=N
     max_alloc_frac = float(os.environ.get("BENCH_MAX_ALLOC_FRAC", "0.55"))
     total_mem = props.total_memory
     supported_fields = query_info.get("supported", [])
+    run_matmul = os.environ.get("RUN_MATMUL", "1").strip().lower() not in {"0", "false", "no", "off"}
+    run_copy_bench = os.environ.get("RUN_COPY_BENCH", "1").strip().lower() not in {"0", "false", "no", "off"}
 
-    for dtype_name, dtype in dtypes:
-        for n in sizes:
-            bytes_needed = 3 * n * n * torch.tensor([], dtype=dtype).element_size()
-            if bytes_needed > total_mem * max_alloc_frac:
-                results["matmul"].append({
-                    "vboost": vboost_value,
-                    "dtype": dtype_name,
-                    "n": n,
-                    "skipped": True,
-                    "reason": f"needs {bytes_needed} bytes > fraction of total mem",
-                })
-                continue
-            try:
-                torch.backends.cuda.matmul.allow_tf32 = dtype_name != "fp32"
-                a = torch.randn((n, n), device=dev, dtype=dtype)
-                b = torch.randn((n, n), device=dev, dtype=dtype)
-                for _ in range(8):
-                    c = a @ b
-                torch.cuda.synchronize()
-                times = []
-                t_end = time.perf_counter() + matmul_seconds
-                while time.perf_counter() < t_end:
-                    start = torch.cuda.Event(enable_timing=True)
-                    end = torch.cuda.Event(enable_timing=True)
-                    start.record()
-                    c = a @ b
-                    end.record()
-                    end.synchronize()
-                    times.append(start.elapsed_time(end) / 1000.0)
-                flops = 2.0 * n * n * n
-                rec = {
-                    "vboost": vboost_value,
-                    "dtype": dtype_name,
-                    "torch_dtype": str(dtype),
-                    "n": n,
-                    "iterations": len(times),
-                    "median_seconds": percentile(times, 50),
-                    "p05_seconds": percentile(times, 5),
-                    "p95_seconds": percentile(times, 95),
-                    "best_seconds": min(times) if times else None,
-                    "median_TFLOP_s": flops / percentile(times, 50) / 1e12 if times else None,
-                    "best_TFLOP_s": flops / min(times) / 1e12 if times else None,
-                    "nvidia_smi_after": nvsmi_query(supported_fields),
-                }
-                print(json.dumps({"matmul": rec}, sort_keys=True), flush=True)
-                results["matmul"].append(rec)
-                del a, b, c
-                torch.cuda.empty_cache()
-            except Exception as e:
-                results["matmul"].append({"vboost": vboost_value, "dtype": dtype_name, "n": n, "error": repr(e)})
+    if run_matmul:
+        for dtype_name, dtype in dtypes:
+            for n in sizes:
+                bytes_needed = 3 * n * n * torch.tensor([], dtype=dtype).element_size()
+                if bytes_needed > total_mem * max_alloc_frac:
+                    results["matmul"].append({
+                        "vboost": vboost_value,
+                        "dtype": dtype_name,
+                        "n": n,
+                        "skipped": True,
+                        "reason": f"needs {bytes_needed} bytes > fraction of total mem",
+                    })
+                    continue
                 try:
+                    torch.backends.cuda.matmul.allow_tf32 = dtype_name != "fp32"
+                    a = torch.randn((n, n), device=dev, dtype=dtype)
+                    b = torch.randn((n, n), device=dev, dtype=dtype)
+                    for _ in range(8):
+                        c = a @ b
+                    torch.cuda.synchronize()
+                    times = []
+                    t_end = time.perf_counter() + matmul_seconds
+                    while time.perf_counter() < t_end:
+                        start = torch.cuda.Event(enable_timing=True)
+                        end = torch.cuda.Event(enable_timing=True)
+                        start.record()
+                        c = a @ b
+                        end.record()
+                        end.synchronize()
+                        times.append(start.elapsed_time(end) / 1000.0)
+                    flops = 2.0 * n * n * n
+                    rec = {
+                        "vboost": vboost_value,
+                        "dtype": dtype_name,
+                        "torch_dtype": str(dtype),
+                        "n": n,
+                        "iterations": len(times),
+                        "median_seconds": percentile(times, 50),
+                        "p05_seconds": percentile(times, 5),
+                        "p95_seconds": percentile(times, 95),
+                        "best_seconds": min(times) if times else None,
+                        "median_TFLOP_s": flops / percentile(times, 50) / 1e12 if times else None,
+                        "best_TFLOP_s": flops / min(times) / 1e12 if times else None,
+                        "nvidia_smi_after": nvsmi_query(supported_fields),
+                    }
+                    print(json.dumps({"matmul": rec}, sort_keys=True), flush=True)
+                    results["matmul"].append(rec)
+                    del a, b, c
                     torch.cuda.empty_cache()
-                except Exception:
-                    pass
+                except Exception as e:
+                    results["matmul"].append({"vboost": vboost_value, "dtype": dtype_name, "n": n, "error": repr(e)})
+                    try:
+                        torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+    else:
+        results["matmul"].append({"vboost": vboost_value, "skipped": True, "reason": "RUN_MATMUL=0"})
 
     results["lowp"] = run_lowp_after_matmul(out.parent, out, vboost_value)
 
-    for mib in [256, 1024, 4096, 8192]:
-        numel = mib * 1024 * 1024 // 4
-        try:
-            d0 = torch.empty(numel, device=dev, dtype=torch.float32)
-            d1 = torch.empty_like(d0)
-            for _ in range(8):
-                d1.copy_(d0)
-            torch.cuda.synchronize()
-            times = []
-            for _ in range(30):
-                start = torch.cuda.Event(enable_timing=True)
-                end = torch.cuda.Event(enable_timing=True)
-                start.record()
-                d1.copy_(d0)
-                end.record()
-                end.synchronize()
-                times.append(start.elapsed_time(end) / 1000.0)
-            rec = {
-                "vboost": vboost_value,
-                "kind": "device_to_device_copy",
-                "MiB": mib,
-                "median_GB_s": (mib * 1024 * 1024) / percentile(times, 50) / 1e9,
-                "best_GB_s": (mib * 1024 * 1024) / min(times) / 1e9,
-                "nvidia_smi_after": nvsmi_query(supported_fields),
-            }
-            results["bandwidth"].append(rec)
-            print(json.dumps({"bandwidth": rec}, sort_keys=True), flush=True)
-            del d0, d1
-            torch.cuda.empty_cache()
-        except Exception as e:
-            results["bandwidth"].append({"vboost": vboost_value, "kind": "device_to_device_copy", "MiB": mib, "error": repr(e)})
-
-        try:
-            h = torch.empty(numel, device="cpu", dtype=torch.float32, pin_memory=True)
-            d = torch.empty(numel, device=dev, dtype=torch.float32)
-            stream = torch.cuda.Stream()
-            for direction in ["h2d", "d2h"]:
+    if not run_copy_bench:
+        results["bandwidth"].append({"vboost": vboost_value, "kind": "all", "skipped": True, "reason": "RUN_COPY_BENCH=0"})
+    else:
+        for mib in [256, 1024, 4096, 8192]:
+            numel = mib * 1024 * 1024 // 4
+            try:
+                d0 = torch.empty(numel, device=dev, dtype=torch.float32)
+                d1 = torch.empty_like(d0)
+                for _ in range(8):
+                    d1.copy_(d0)
+                torch.cuda.synchronize()
                 times = []
-                for _ in range(20):
+                for _ in range(30):
                     start = torch.cuda.Event(enable_timing=True)
                     end = torch.cuda.Event(enable_timing=True)
-                    with torch.cuda.stream(stream):
-                        start.record(stream)
-                        if direction == "h2d":
-                            d.copy_(h, non_blocking=True)
-                        else:
-                            h.copy_(d, non_blocking=True)
-                        end.record(stream)
+                    start.record()
+                    d1.copy_(d0)
+                    end.record()
                     end.synchronize()
                     times.append(start.elapsed_time(end) / 1000.0)
                 rec = {
                     "vboost": vboost_value,
-                    "kind": direction,
+                    "kind": "device_to_device_copy",
                     "MiB": mib,
                     "median_GB_s": (mib * 1024 * 1024) / percentile(times, 50) / 1e9,
                     "best_GB_s": (mib * 1024 * 1024) / min(times) / 1e9,
@@ -421,10 +399,43 @@ def bench_torch(out: Path, query_info=None, *, vboost_value=None, vboost_state=N
                 }
                 results["bandwidth"].append(rec)
                 print(json.dumps({"bandwidth": rec}, sort_keys=True), flush=True)
-            del h, d
-            torch.cuda.empty_cache()
-        except Exception as e:
-            results["bandwidth"].append({"vboost": vboost_value, "kind": "pinned_h2d_d2h", "MiB": mib, "error": repr(e)})
+                del d0, d1
+                torch.cuda.empty_cache()
+            except Exception as e:
+                results["bandwidth"].append({"vboost": vboost_value, "kind": "device_to_device_copy", "MiB": mib, "error": repr(e)})
+
+            try:
+                h = torch.empty(numel, device="cpu", dtype=torch.float32, pin_memory=True)
+                d = torch.empty(numel, device=dev, dtype=torch.float32)
+                stream = torch.cuda.Stream()
+                for direction in ["h2d", "d2h"]:
+                    times = []
+                    for _ in range(20):
+                        start = torch.cuda.Event(enable_timing=True)
+                        end = torch.cuda.Event(enable_timing=True)
+                        with torch.cuda.stream(stream):
+                            start.record(stream)
+                            if direction == "h2d":
+                                d.copy_(h, non_blocking=True)
+                            else:
+                                h.copy_(d, non_blocking=True)
+                            end.record(stream)
+                        end.synchronize()
+                        times.append(start.elapsed_time(end) / 1000.0)
+                    rec = {
+                        "vboost": vboost_value,
+                        "kind": direction,
+                        "MiB": mib,
+                        "median_GB_s": (mib * 1024 * 1024) / percentile(times, 50) / 1e9,
+                        "best_GB_s": (mib * 1024 * 1024) / min(times) / 1e9,
+                        "nvidia_smi_after": nvsmi_query(supported_fields),
+                    }
+                    results["bandwidth"].append(rec)
+                    print(json.dumps({"bandwidth": rec}, sort_keys=True), flush=True)
+                del h, d
+                torch.cuda.empty_cache()
+            except Exception as e:
+                results["bandwidth"].append({"vboost": vboost_value, "kind": "pinned_h2d_d2h", "MiB": mib, "error": repr(e)})
 
     try:
         results["allocator"].append({"vboost": vboost_value, "memory_summary": torch.cuda.memory_summary()})

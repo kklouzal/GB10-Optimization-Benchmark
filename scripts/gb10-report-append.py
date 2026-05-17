@@ -92,7 +92,7 @@ def lowp_section(root: Path) -> str:
         lines.append("Best dense-equivalent median TFLOP/s by low-precision suite:")
         for suite, row in sorted(best_by_suite.items()):
             lines.append(
-                f"- `{suite}` vboost=`{row.get('vboost_label')}` shape=`{row.get('m')}x{row.get('n')}x{row.get('k')}` "
+                f"- `{suite}` vboost=`{row.get('vboost_label')}` lock=`{row.get('gpu_clock_lock_label')}` shape=`{row.get('m')}x{row.get('n')}x{row.get('k')}` "
                 f"median=`{fmt_num(row.get('median_TFLOP_s_dense_equiv'))}` best=`{fmt_num(row.get('best_TFLOP_s_dense_equiv'))}`"
             )
     best_by_vboost = data.get("best_by_vboost") or {}
@@ -101,7 +101,7 @@ def lowp_section(root: Path) -> str:
         lines.append("Best low-precision result by vboost:")
         for vb, row in sorted(best_by_vboost.items(), key=lambda x: str(x[0])):
             lines.append(
-                f"- vboost=`{vb}` suite=`{row.get('suite')}` shape=`{row.get('m')}x{row.get('n')}x{row.get('k')}` "
+                f"- vboost=`{vb}` suite=`{row.get('suite')}` lock=`{row.get('gpu_clock_lock_label')}` shape=`{row.get('m')}x{row.get('n')}x{row.get('k')}` "
                 f"median=`{fmt_num(row.get('median_TFLOP_s_dense_equiv'))}`"
             )
     if not scored:

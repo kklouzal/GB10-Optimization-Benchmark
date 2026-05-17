@@ -332,6 +332,43 @@ def set_vboost(value: int) -> Dict[str, Any]:
     return run_cmd(["nvidia-smi", "boost-slider", "--vboost", str(value)], timeout=20)
 
 
+def reset_gpu_clocks() -> Dict[str, Any]:
+    return run_cmd(["nvidia-smi", "--reset-gpu-clocks"], timeout=20)
+
+
+def set_gpu_clock_lock(range_spec: str) -> Dict[str, Any]:
+    return run_cmd(["nvidia-smi", f"--lock-gpu-clocks={range_spec}", "--mode=0"], timeout=20)
+
+
+def parse_gpu_clock_lock_values(raw: str) -> Tuple[List[Optional[str]], str]:
+    raw = (raw or "").strip()
+    if not raw or raw.lower() in {"none", "off", "disabled"}:
+        return [None], "unlocked-only"
+    values: List[Optional[str]] = []
+    for part in re.split(r"[;\n]+", raw):
+        part = part.strip()
+        if not part:
+            continue
+        lowered = part.lower()
+        if lowered in {"none", "off", "reset", "unlocked", "default"}:
+            values.append(None)
+            continue
+        if not re.fullmatch(r"\d+,\d+", part):
+            raise ValueError(f"invalid LOWP_GPU_CLOCK_LOCKS entry {part!r}; expected min,max or reset/off")
+        values.append(part)
+    deduped: List[Optional[str]] = []
+    for value in values:
+        if value not in deduped:
+            deduped.append(value)
+    if None not in deduped:
+        deduped.insert(0, None)
+    return deduped or [None], "explicit"
+
+
+def gpu_clock_lock_label(range_spec: Optional[str]) -> str:
+    return "reset" if range_spec is None else range_spec.replace(",", "-")
+
+
 def parse_vboost_values(raw: str, initial: Dict[str, Any]) -> Tuple[List[Optional[int]], str]:
     raw = (raw or "current").strip().lower()
     if raw in {"", "current", "none"}:
@@ -368,10 +405,14 @@ class Config:
     run_torch_fp8: bool
     run_te: bool
     run_trtllm_probe: bool
+    gpu_clock_locks: List[Optional[str]]
+    gpu_clock_lock_source: str
+    gpu_clock_settle_s: float
 
 
 def build_config() -> Config:
     default_shapes = "512x4096x4096,1024x8192x8192,2048x8192x8192,4096x8192x8192,8192x8192x8192"
+    gpu_clock_locks, gpu_clock_lock_source = parse_gpu_clock_lock_values(os.environ.get("LOWP_GPU_CLOCK_LOCKS", ""))
     return Config(
         seconds=getenv_float("LOWP_SECONDS", 12.0),
         warmup=getenv_int("LOWP_WARMUP", 12),
@@ -384,6 +425,9 @@ def build_config() -> Config:
         run_torch_fp8=getenv_bool("RUN_TORCH_FP8", True),
         run_te=getenv_bool("RUN_TE_LOWP", True),
         run_trtllm_probe=getenv_bool("RUN_TRTLLM_PROBE", True),
+        gpu_clock_locks=gpu_clock_locks,
+        gpu_clock_lock_source=gpu_clock_lock_source,
+        gpu_clock_settle_s=getenv_float("LOWP_GPU_CLOCK_SETTLE_S", getenv_float("LOWP_VBOOST_SETTLE_S", getenv_float("GB10_VBOOST_SETTLE_S", 5.0))),
     )
 
 
@@ -707,32 +751,86 @@ def run_one_vboost(out: Path, cfg: Config, vboost: Optional[int], nvsmi_fields: 
     write_text(run_dir / "nvidia_smi_q_before.txt", sh("nvidia-smi -q -d CLOCK,POWER,PERFORMANCE,TEMPERATURE", timeout=30))
 
     total_mem = torch.cuda.get_device_properties(0).total_memory if torch.cuda.is_available() else 0
+    clock_lock_runs: List[Dict[str, Any]] = []
     records: List[Dict[str, Any]] = []
-    live_path = run_dir / "lowp_nvidia_smi_live.csv"
-    dmon_path = run_dir / "lowp_nvidia_smi_dmon.csv"
-    with Telemetry(
-        live_path,
-        nvsmi_fields,
-        interval=cfg.telemetry_interval,
-        dmon_path=dmon_path if getenv_bool("LOWP_ENABLE_DMON", True) else None,
-    ):
-        if torch.cuda.is_available():
-            records.extend(run_torch_fp8(cfg, total_mem, vboost))
-            records.extend(run_te_lowp(cfg, total_mem, vboost))
-        else:
-            records.append({"suite": "all", "vboost": vboost, "skipped": True, "reason": "torch.cuda.is_available() is False"})
+    for clock_lock in cfg.gpu_clock_locks:
+        lock_label = gpu_clock_lock_label(clock_lock)
+        lock_dir = run_dir / f"lock-{lock_label}"
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        reset_before = reset_gpu_clocks()
+        write_text(lock_dir / "gpu_clock_reset_before.txt", command_output(reset_before))
+        lock_result = None
+        if clock_lock is not None:
+            lock_result = set_gpu_clock_lock(clock_lock)
+            write_text(lock_dir / "gpu_clock_lock_set.txt", command_output(lock_result))
+            if not lock_result.get("ok"):
+                rec = {
+                    "suite": "all",
+                    "vboost": vboost,
+                    "vboost_label": label,
+                    "gpu_clock_lock": clock_lock,
+                    "gpu_clock_lock_label": lock_label,
+                    "skipped": True,
+                    "reason": f"lock-gpu-clocks failed: {command_output(lock_result)}",
+                }
+                lock_run = {
+                    "gpu_clock_lock": clock_lock,
+                    "gpu_clock_lock_label": lock_label,
+                    "set_result": lock_result,
+                    "records": [rec],
+                }
+                write_json(lock_dir / "lowp_bench.json", lock_run)
+                clock_lock_runs.append(lock_run)
+                records.append(rec)
+                continue
+        time.sleep(cfg.gpu_clock_settle_s)
+        write_text(lock_dir / "nvidia_smi_q_before.txt", sh("nvidia-smi -q -d CLOCK,POWER,PERFORMANCE,TEMPERATURE", timeout=30))
+        lock_records: List[Dict[str, Any]] = []
+        live_path = lock_dir / "lowp_nvidia_smi_live.csv"
+        dmon_path = lock_dir / "lowp_nvidia_smi_dmon.csv"
+        with Telemetry(
+            live_path,
+            nvsmi_fields,
+            interval=cfg.telemetry_interval,
+            dmon_path=dmon_path if getenv_bool("LOWP_ENABLE_DMON", True) else None,
+        ):
+            if torch.cuda.is_available():
+                lock_records.extend(run_torch_fp8(cfg, total_mem, vboost))
+                lock_records.extend(run_te_lowp(cfg, total_mem, vboost))
+            else:
+                lock_records.append({"suite": "all", "vboost": vboost, "skipped": True, "reason": "torch.cuda.is_available() is False"})
+        for rec in lock_records:
+            rec.setdefault("vboost", vboost)
+            rec.setdefault("vboost_label", label)
+            rec["gpu_clock_lock"] = clock_lock
+            rec["gpu_clock_lock_label"] = lock_label
+        write_text(lock_dir / "nvidia_smi_q_after.txt", sh("nvidia-smi -q -d CLOCK,POWER,PERFORMANCE,TEMPERATURE", timeout=30))
+        tel_summary = summarize_telemetry(live_path)
+        reset_after = reset_gpu_clocks()
+        write_text(lock_dir / "gpu_clock_reset_after.txt", command_output(reset_after))
+        lock_run = {
+            "gpu_clock_lock": clock_lock,
+            "gpu_clock_lock_label": lock_label,
+            "set_result": lock_result,
+            "reset_before": reset_before,
+            "reset_after": reset_after,
+            "telemetry_summary": tel_summary,
+            "records": lock_records,
+        }
+        write_json(lock_dir / "lowp_bench.json", lock_run)
+        clock_lock_runs.append(lock_run)
+        records.extend(lock_records)
 
     after = query_vboost_state()
     write_json(run_dir / "vboost_after.json", after)
     write_text(run_dir / "nvidia_smi_q_after.txt", sh("nvidia-smi -q -d CLOCK,POWER,PERFORMANCE,TEMPERATURE", timeout=30))
-    tel_summary = summarize_telemetry(live_path)
     run = {
         "vboost": vboost,
         "label": label,
         "set_result": set_result,
         "vboost_before": before,
         "vboost_after": after,
-        "telemetry_summary": tel_summary,
+        "clock_lock_runs": clock_lock_runs,
         "records": records,
     }
     write_json(run_dir / "lowp_bench.json", run)
@@ -779,6 +877,8 @@ def summarize_runs(out: Path, meta: Dict[str, Any], runs: List[Dict[str, Any]]) 
             row = dict(rec)
             row.setdefault("vboost", run.get("vboost"))
             row.setdefault("vboost_label", run.get("label"))
+            row.setdefault("gpu_clock_lock", None)
+            row.setdefault("gpu_clock_lock_label", "reset")
             records.append(row)
     scored = [r for r in records if r.get("median_TFLOP_s_dense_equiv") is not None]
     failure_categories, error_count, skipped_count = summarize_lowp_failures(records)
@@ -795,6 +895,12 @@ def summarize_runs(out: Path, meta: Dict[str, Any], runs: List[Dict[str, Any]]) 
         prev = best_by_vboost.get(key)
         if prev is None or (row.get("median_TFLOP_s_dense_equiv") or 0) > (prev.get("median_TFLOP_s_dense_equiv") or 0):
             best_by_vboost[key] = row
+    best_by_lock: Dict[str, Dict[str, Any]] = {}
+    for row in scored:
+        key = str(row.get("gpu_clock_lock_label"))
+        prev = best_by_lock.get(key)
+        if prev is None or (row.get("median_TFLOP_s_dense_equiv") or 0) > (prev.get("median_TFLOP_s_dense_equiv") or 0):
+            best_by_lock[key] = row
     summary = {
         "meta": meta,
         "record_count": len(records),
@@ -805,6 +911,7 @@ def summarize_runs(out: Path, meta: Dict[str, Any], runs: List[Dict[str, Any]]) 
         "failure_categories": failure_categories,
         "best_by_suite": best_by_suite,
         "best_by_vboost": best_by_vboost,
+        "best_by_lock": best_by_lock,
         "runs": runs,
         "records": records,
     }
@@ -819,6 +926,7 @@ def summarize_runs(out: Path, meta: Dict[str, Any], runs: List[Dict[str, Any]]) 
         "n",
         "k",
         "iterations",
+        "gpu_clock_lock_label",
         "median_seconds",
         "p95_seconds",
         "best_seconds",
@@ -850,7 +958,7 @@ def summarize_runs(out: Path, meta: Dict[str, Any], runs: List[Dict[str, Any]]) 
     if best_by_suite:
         for suite, row in sorted(best_by_suite.items()):
             lines.append(
-                f"- `{suite}` vboost={row.get('vboost_label')} shape={row.get('m')}x{row.get('n')}x{row.get('k')} "
+                f"- `{suite}` vboost={row.get('vboost_label')} lock={row.get('gpu_clock_lock_label')} shape={row.get('m')}x{row.get('n')}x{row.get('k')} "
                 f"median={row.get('median_TFLOP_s_dense_equiv'):.3f} dense-equiv TFLOP/s "
                 f"best={row.get('best_TFLOP_s_dense_equiv'):.3f}"
             )
@@ -861,7 +969,17 @@ def summarize_runs(out: Path, meta: Dict[str, Any], runs: List[Dict[str, Any]]) 
     if best_by_vboost:
         for vb, row in sorted(best_by_vboost.items(), key=lambda x: str(x[0])):
             lines.append(
-                f"- vboost={vb}: `{row.get('suite')}` shape={row.get('m')}x{row.get('n')}x{row.get('k')} "
+                f"- vboost={vb}: `{row.get('suite')}` lock={row.get('gpu_clock_lock_label')} shape={row.get('m')}x{row.get('n')}x{row.get('k')} "
+                f"median={row.get('median_TFLOP_s_dense_equiv'):.3f} dense-equiv TFLOP/s"
+            )
+    else:
+        lines.append("- unavailable")
+    lines.append("")
+    lines.append("## Best result by GPU clock lock")
+    if best_by_lock:
+        for lock, row in sorted(best_by_lock.items(), key=lambda x: str(x[0])):
+            lines.append(
+                f"- lock={lock}: `{row.get('suite')}` vboost={row.get('vboost_label')} shape={row.get('m')}x{row.get('n')}x{row.get('k')} "
                 f"median={row.get('median_TFLOP_s_dense_equiv'):.3f} dense-equiv TFLOP/s"
             )
     else:
@@ -869,7 +987,8 @@ def summarize_runs(out: Path, meta: Dict[str, Any], runs: List[Dict[str, Any]]) 
     lines.append("")
     lines.append("## Telemetry files")
     for run in runs:
-        lines.append(f"- `vboost-{run.get('label')}/lowp_nvidia_smi_live.csv` and `vboost-{run.get('label')}/lowp_nvidia_smi_dmon.csv`")
+        for lock_run in run.get("clock_lock_runs", []):
+            lines.append(f"- `vboost-{run.get('label')}/lock-{lock_run.get('gpu_clock_lock_label')}/lowp_nvidia_smi_live.csv` and `vboost-{run.get('label')}/lock-{lock_run.get('gpu_clock_lock_label')}/lowp_nvidia_smi_dmon.csv`")
     write_text(out / "lowp_summary.md", "\n".join(lines) + "\n")
     return summary
 
@@ -927,7 +1046,7 @@ def main() -> None:
         "started_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "python": sys.version,
         "platform": platform.platform(),
-        "config": cfg.__dict__ | {"shapes": cfg.shapes},
+        "config": cfg.__dict__ | {"shapes": cfg.shapes, "gpu_clock_locks": cfg.gpu_clock_locks},
         "env": {k: os.environ.get(k) for k in sorted(os.environ) if k.startswith(("LOWP_", "RUN_", "GB10_", "CUDA_", "NVIDIA_", "PYTORCH_", "OMP_", "MALLOC_"))},
         "nvidia_smi_query": nvsmi_probe,
         "nvidia_smi_start": sh("nvidia-smi", timeout=20),

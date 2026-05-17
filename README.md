@@ -221,3 +221,21 @@ gb10-lab tunables
 ```
 
 Outputs are written under `tunables/`; see `docs/MAXPERF-TUNING-MATRIX.md`.
+
+## Lowp-focused launch shape
+
+For lowp-only sweeps, disable the long dense/copy side probes and leave the benchmark focused on per-vboost low-precision comparisons plus optional GPU clock-lock A/B:
+
+```bash
+-e RUN_LOWP=1 \
+-e RUN_MATMUL=0 \
+-e RUN_COPY_BENCH=0 \
+-e RUN_NVBANDWIDTH=0 \
+-e RUN_STREAM=0 \
+-e RUN_DCGM=0 \
+-e RUN_FIO=0 \
+-e LOWP_VBOOST_VALUES=auto \
+-e LOWP_GPU_CLOCK_LOCKS='reset;2268,2418;2350,2418;2418,2418;2300,2600;2400,2600'
+```
+
+This produces lowp results for each vboost level, and for each vboost level it also tests the unlocked baseline plus each requested `--lock-gpu-clocks` range.

@@ -18,6 +18,7 @@ When the full bench suite runs with `RUN_LOWP=1`, the low-precision benchmark no
 ```bash
 -e RUN_LOWP=1 \
 -e LOWP_VBOOST_VALUES=current
+LOWP_GPU_CLOCK_LOCKS='reset;2268,2418;2350,2418;2418,2418;2300,2600;2400,2600'
 ```
 
 To sweep every advertised vboost value specifically for standalone FP8/MXFP8/NVFP4 runs:
@@ -53,6 +54,7 @@ LOWP_OUT_DTYPE=bf16
 LOWP_TE_DTYPE=bf16
 LOWP_DYNAMIC_QUANT=1
 LOWP_VBOOST_VALUES=current
+LOWP_GPU_CLOCK_LOCKS='reset;2268,2418;2350,2418;2418,2418;2300,2600;2400,2600'
 LOWP_ENABLE_DMON=1
 ```
 
@@ -105,3 +107,21 @@ Questions this benchmark helps answer:
 5. Is dynamic activation quantization much slower than static prequantized FP8 GEMM?
 
 If all NVFP4/MXFP8 tests are skipped, the issue is usually framework/container exposure rather than the hardware. Try a newer NGC PyTorch or TensorRT-LLM container and compare `lowp_meta.json`.
+
+## Lowp-focused launch shape
+
+For lowp-only sweeps, disable the long dense/copy side probes and leave the benchmark focused on per-vboost low-precision comparisons plus optional GPU clock-lock A/B:
+
+```bash
+-e RUN_LOWP=1 \
+-e RUN_MATMUL=0 \
+-e RUN_COPY_BENCH=0 \
+-e RUN_NVBANDWIDTH=0 \
+-e RUN_STREAM=0 \
+-e RUN_DCGM=0 \
+-e RUN_FIO=0 \
+-e LOWP_VBOOST_VALUES=auto \
+-e LOWP_GPU_CLOCK_LOCKS='reset;2268,2418;2350,2418;2418,2418;2300,2600;2400,2600'
+```
+
+This produces lowp results for each vboost level, and for each vboost level it also tests the unlocked baseline plus each requested `--lock-gpu-clocks` range.

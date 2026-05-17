@@ -28,12 +28,16 @@ Environment:
   RUN_FIO=0|1                            optional storage test on /results
   RUN_STREAM=1                           run CPU STREAM-like memory test
   RUN_PROFILING_HINTS=1                  collect nsys/ncu availability
+  RUN_MATMUL=1                           run dense TF32/FP32/BF16/FP16 GEMM profiling
+  RUN_COPY_BENCH=1                       run internal device/pinned copy bandwidth probes
   BENCH_SECONDS=20                       telemetry benchmark duration per dtype/size family
   GB10_VBOOST_VALUES=auto                auto-sweep 0..advertised vboost max by default
   GB10_VBOOST_SETTLE_S=5                 seconds to settle after each vboost change
   RUN_TUNABLES=1                         collect tunability matrix
   RUN_LOWP=1                             run FP8/MXFP8/NVFP4 low-precision benchmarks
   LOWP_VBOOST_VALUES=current             current|auto|roundtrip|0,3,4,3,0
+  LOWP_GPU_CLOCK_LOCKS=reset;2400,2600   unlocked baseline plus semicolon-separated lock ranges
+  LOWP_GPU_CLOCK_SETTLE_S=5              settle time after each lock/unlock change
   LOWP_SECONDS=12                        seconds per low-precision case
   LOWP_SHAPES=...                        comma-separated N or MxNxK shapes
   GB10_APPLY=1                           required for apply-safe
